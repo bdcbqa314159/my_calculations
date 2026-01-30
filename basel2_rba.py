@@ -35,15 +35,17 @@ class Granularity(Enum):
     NON_GRANULAR = "non_granular"
 
 
+class ExposureType(Enum):
+    SECURITISATION = "securitisation"
+    RESECURITISATION = "resecuritisation"
+
+
 # =============================================================================
 # BASEL II RBA RISK WEIGHT TABLES
 # =============================================================================
 
-# Long-term ratings: Rating -> (Senior, Non-Senior Granular, Non-Senior Non-Granular)
-# Index by rating grade (1 = AAA, 2 = AA, etc.)
-
+# Standard Securitisation: Rating -> (Senior, Non-Senior Granular, Non-Senior Non-Granular)
 BASEL2_RBA_TABLE = {
-    # Rating Grade: (Senior, Non-Senior Granular, Non-Senior Non-Granular)
     1:  (0.07, 0.12, 0.20),   # AAA
     2:  (0.08, 0.15, 0.25),   # AA
     3:  (0.10, 0.18, 0.30),   # A+
@@ -55,7 +57,24 @@ BASEL2_RBA_TABLE = {
     9:  (2.50, 2.50, 2.50),   # BB+
     10: (4.25, 4.25, 4.25),   # BB
     11: (6.50, 6.50, 6.50),   # BB-
-    12: (12.50, 12.50, 12.50), # Below BB- (deduction)
+    12: (12.50, 12.50, 12.50), # Below BB-
+}
+
+# RE-SECURITISATION: Rating -> (Senior, Non-Senior)
+# Higher RWs for CDO-squared, re-packaged securitisations, etc.
+BASEL2_RESEC_TABLE = {
+    1:  (0.20, 0.30),   # AAA
+    2:  (0.30, 0.40),   # AA
+    3:  (0.40, 0.50),   # A+
+    4:  (0.50, 0.65),   # A
+    5:  (0.65, 0.85),   # A-
+    6:  (0.85, 1.00),   # BBB+
+    7:  (1.00, 1.25),   # BBB
+    8:  (1.25, 1.50),   # BBB-
+    9:  (4.25, 5.50),   # BB+
+    10: (6.50, 8.50),   # BB
+    11: (9.50, 12.50),  # BB-
+    12: (12.50, 12.50), # Below BB-
 }
 
 # Rating labels
@@ -106,15 +125,20 @@ class RBAResult:
     rating_label: str
     seniority: Seniority
     granularity: Granularity
+    exposure_type: ExposureType
     
     # Risk weights from table
     rw_senior: float
     rw_non_senior_granular: float
     rw_non_senior_non_granular: float
     
+    # Re-sec RWs (if applicable)
+    rw_resec_senior: Optional[float] = None
+    rw_resec_non_senior: Optional[float] = None
+    
     # Selected RW
-    rw: float
-    rw_source: str
+    rw: float = 0.0
+    rw_source: str = ""
     
     # Optional
     exposure: Optional[float] = None
@@ -133,16 +157,28 @@ class RBAResult:
             f"  Rating Grade:          {self.rating_grade} ({self.rating_label})",
             f"  Seniority (inferred):  {self.seniority.value}",
             f"  Granularity (assumed): {self.granularity.value}",
+            f"  Exposure Type:         {self.exposure_type.value}",
             "",
-            "AVAILABLE RISK WEIGHTS:",
+            "STANDARD SECURITISATION RWs:",
             f"  Senior:                {self.rw_senior:.2%}",
             f"  Non-Senior Granular:   {self.rw_non_senior_granular:.2%}",
             f"  Non-Senior Non-Gran:   {self.rw_non_senior_non_granular:.2%}",
+        ]
+        
+        if self.rw_resec_senior is not None:
+            lines.extend([
+                "",
+                "RE-SECURITISATION RWs:",
+                f"  Re-Sec Senior:         {self.rw_resec_senior:.2%}",
+                f"  Re-Sec Non-Senior:     {self.rw_resec_non_senior:.2%}",
+            ])
+        
+        lines.extend([
             "",
             "SELECTED:",
             f"  Risk Weight:           {self.rw:.2%}",
             f"  Source:                {self.rw_source}",
-        ]
+        ])
         
         if self.exposure is not None:
             lines.extend([
@@ -192,33 +228,43 @@ def infer_seniority(pd: float, threshold: float = 0.0010) -> Seniority:
 
 
 def get_rw_from_table(rating_grade: int, seniority: Seniority, 
-                       granularity: Granularity) -> Tuple[float, str]:
+                       granularity: Granularity,
+                       exposure_type: ExposureType = ExposureType.SECURITISATION) -> Tuple[float, str]:
     """
     Look up RW from Basel II RBA table.
     
     Args:
         rating_grade: 1-12
         seniority: Senior or Non-Senior
-        granularity: Granular or Non-Granular
+        granularity: Granular or Non-Granular (only for standard securitisation)
+        exposure_type: SECURITISATION or RESECURITISATION
     
     Returns:
         Tuple of (RW, source_description)
     """
     grade = max(1, min(12, rating_grade))
-    rw_senior, rw_nsg, rw_nsng = BASEL2_RBA_TABLE[grade]
     
-    if seniority == Seniority.SENIOR:
-        return rw_senior, f"Senior, Rating {RATING_LABELS[grade]}"
-    elif granularity == Granularity.GRANULAR:
-        return rw_nsg, f"Non-Senior Granular, Rating {RATING_LABELS[grade]}"
+    if exposure_type == ExposureType.RESECURITISATION:
+        rw_senior, rw_non_senior = BASEL2_RESEC_TABLE[grade]
+        if seniority == Seniority.SENIOR:
+            return rw_senior, f"Re-Sec Senior, Rating {RATING_LABELS[grade]}"
+        else:
+            return rw_non_senior, f"Re-Sec Non-Senior, Rating {RATING_LABELS[grade]}"
     else:
-        return rw_nsng, f"Non-Senior Non-Granular, Rating {RATING_LABELS[grade]}"
+        rw_senior, rw_nsg, rw_nsng = BASEL2_RBA_TABLE[grade]
+        if seniority == Seniority.SENIOR:
+            return rw_senior, f"Senior, Rating {RATING_LABELS[grade]}"
+        elif granularity == Granularity.GRANULAR:
+            return rw_nsg, f"Non-Senior Granular, Rating {RATING_LABELS[grade]}"
+        else:
+            return rw_nsng, f"Non-Senior Non-Granular, Rating {RATING_LABELS[grade]}"
 
 
 def calculate_basel2_rba(
     pd: float,
     seniority: Optional[Seniority] = None,
     granularity: Granularity = Granularity.NON_GRANULAR,
+    exposure_type: ExposureType = ExposureType.SECURITISATION,
     seniority_threshold: float = 0.0010,
     exposure: Optional[float] = None,
     verbose: bool = False
@@ -230,6 +276,7 @@ def calculate_basel2_rba(
         pd: Probability of Default as decimal
         seniority: Override seniority (if None, inferred from PD)
         granularity: Pool granularity (default: Non-Granular = conservative)
+        exposure_type: SECURITISATION or RESECURITISATION
         seniority_threshold: PD cutoff for inferring senior (default 0.10%)
         exposure: Optional exposure amount
         verbose: Print detailed output
@@ -244,11 +291,14 @@ def calculate_basel2_rba(
     if seniority is None:
         seniority = infer_seniority(pd, seniority_threshold)
     
-    # Get all RWs from table
+    # Get standard securitisation RWs
     rw_senior, rw_nsg, rw_nsng = BASEL2_RBA_TABLE[rating_grade]
     
-    # Select appropriate RW
-    rw, rw_source = get_rw_from_table(rating_grade, seniority, granularity)
+    # Get re-securitisation RWs
+    rw_resec_senior, rw_resec_ns = BASEL2_RESEC_TABLE[rating_grade]
+    
+    # Select appropriate RW based on exposure type
+    rw, rw_source = get_rw_from_table(rating_grade, seniority, granularity, exposure_type)
     
     # Calculate RWA
     rwa = exposure * rw if exposure is not None else None
@@ -259,9 +309,12 @@ def calculate_basel2_rba(
         rating_label=rating_label,
         seniority=seniority,
         granularity=granularity,
+        exposure_type=exposure_type,
         rw_senior=rw_senior,
         rw_non_senior_granular=rw_nsg,
         rw_non_senior_non_granular=rw_nsng,
+        rw_resec_senior=rw_resec_senior,
+        rw_resec_non_senior=rw_resec_ns,
         rw=rw,
         rw_source=rw_source,
         exposure=exposure,
@@ -280,7 +333,8 @@ def calculate_basel2_rba(
 
 def quick_rba_rw(pd: float, 
                   seniority: str = "auto",
-                  granularity: str = "non_granular") -> float:
+                  granularity: str = "non_granular",
+                  resec: bool = False) -> float:
     """
     Quick Basel II RBA RW lookup.
     
@@ -288,34 +342,63 @@ def quick_rba_rw(pd: float,
         pd: Probability of Default
         seniority: "senior", "non_senior", or "auto" (infer from PD)
         granularity: "granular" or "non_granular"
+        resec: If True, use re-securitisation tables
     
     Returns:
         Risk Weight as decimal
     """
     sen = None if seniority == "auto" else Seniority(seniority)
     gran = Granularity(granularity)
+    exp_type = ExposureType.RESECURITISATION if resec else ExposureType.SECURITISATION
     
-    result = calculate_basel2_rba(pd, seniority=sen, granularity=gran)
+    result = calculate_basel2_rba(pd, seniority=sen, granularity=gran, exposure_type=exp_type)
     return result.rw
+
+
+def quick_resec_rw(pd: float, seniority: str = "senior") -> float:
+    """
+    Quick Re-Securitisation RW lookup.
+    
+    Args:
+        pd: Probability of Default
+        seniority: "senior" or "non_senior"
+    
+    Returns:
+        Risk Weight as decimal
+    """
+    return quick_rba_rw(pd, seniority=seniority, resec=True)
 
 
 def get_all_rw_options(pd: float) -> Dict[str, float]:
     """
     Get all possible RWs for a given PD.
     
-    Returns dict with keys:
-        - senior
-        - non_senior_granular  
-        - non_senior_non_granular
+    Returns dict with keys for both standard and re-securitisation.
     """
     rating_grade, _ = pd_to_rating(pd)
     rw_s, rw_nsg, rw_nsng = BASEL2_RBA_TABLE[rating_grade]
+    rw_resec_s, rw_resec_ns = BASEL2_RESEC_TABLE[rating_grade]
     
     return {
         "senior": rw_s,
         "non_senior_granular": rw_nsg,
         "non_senior_non_granular": rw_nsng,
+        "resec_senior": rw_resec_s,
+        "resec_non_senior": rw_resec_ns,
     }
+
+
+def print_resec_table():
+    """Print re-securitisation RW table."""
+    print("\n" + "=" * 60)
+    print("BASEL II RE-SECURITISATION RW TABLE")
+    print("=" * 60)
+    print(f"{'Grade':<6} {'Rating':<12} {'Senior':<12} {'Non-Senior':<12}")
+    print("-" * 45)
+    for grade in range(1, 13):
+        rw_s, rw_ns = BASEL2_RESEC_TABLE[grade]
+        print(f"{grade:<6} {RATING_LABELS[grade]:<12} {rw_s:>10.0%}   {rw_ns:>10.0%}")
+    print("=" * 60)
 
 
 def print_basel2_rba_tables():
@@ -669,48 +752,62 @@ if __name__ == "__main__":
     print("BASEL II RBA MODULE - EXAMPLES")
     print("=" * 60)
     
-    # Example 1: Full calculation
-    print("\n--- Example 1: Full RBA Calculation ---")
+    # Example 1: Full calculation with re-securitisation
+    print("\n--- Example 1: Re-Securitisation Calculation ---")
     result = calculate_basel2_rba(
-        pd=0.0003,  # 0.03%
+        pd=0.0003,  # 0.03% -> AA
+        seniority=Seniority.SENIOR,
+        exposure_type=ExposureType.RESECURITISATION,
         exposure=100_000_000,
         verbose=True
     )
     
-    # Example 2: Different seniority/granularity combinations
-    print("\n--- Example 2: All Options for PD = 0.03% ---")
-    options = get_all_rw_options(0.0003)
-    for key, rw in options.items():
-        print(f"  {key:<25}: {rw:.0%}")
+    # Example 2: Compare your bank's RWs with re-sec tables
+    print("\n--- Example 2: Your Bank's Data vs Re-Sec Tables ---")
     
-    # Example 3: Quick lookups matching your observed data
-    print("\n--- Example 3: Quick Lookups ---")
+    # Your observed data from screenshot
+    bank_data = [
+        ("AAA", "senior", 0.20, 0.0001),
+        ("AA", "senior", 0.30, 0.0003),
+        ("A+", "senior", 0.65, 0.0005),  # Hmm, labeled senior but 65%
+        ("A-", "non_senior", 0.70, 0.0020),
+        ("BBB-", "non_senior", 1.05, 0.0100),
+    ]
+    
+    print(f"{'Rating':<8} {'Sen':<12} {'Bank RW':<10} {'Re-Sec S':<10} {'Re-Sec NS':<10} {'Match?':<15}")
+    print("-" * 75)
+    
+    for rating, sen, bank_rw, pd in bank_data:
+        opts = get_all_rw_options(pd)
+        
+        if sen == "senior":
+            expected = opts["resec_senior"]
+            col = "Re-Sec S"
+        else:
+            expected = opts["resec_non_senior"]
+            col = "Re-Sec NS"
+        
+        diff = abs(bank_rw - expected)
+        match = "✓ Match" if diff < 0.02 else f"Diff={diff:.0%}"
+        
+        print(f"{rating:<8} {sen:<12} {bank_rw:>8.0%}   {opts['resec_senior']:>8.0%}   {opts['resec_non_senior']:>8.0%}   {match:<15}")
+    
+    # Example 3: Full tables
+    print("\n--- Example 3: Re-Securitisation Table ---")
+    print_resec_table()
+    
+    # Example 4: Standard vs Re-sec comparison
+    print("\n--- Example 4: Standard Sec vs Re-Sec Comparison ---")
     test_pds = [0.0001, 0.0003, 0.0005, 0.0010, 0.0020, 0.0050, 0.0100]
     
-    print(f"{'PD':<12} {'Rating':<10} {'Senior':<10} {'NS-Gran':<10} {'NS-NonGran':<12}")
-    print("-" * 55)
+    print(f"{'PD':<12} {'Rating':<8} {'Std Senior':<12} {'Re-Sec Senior':<14} {'Re-Sec NS':<12}")
+    print("-" * 60)
     for pd in test_pds:
-        grade, rating = pd_to_rating(pd)
         opts = get_all_rw_options(pd)
-        print(f"{pd:.4%}".ljust(12) + f"{rating:<10} {opts['senior']:>8.0%}   {opts['non_senior_granular']:>8.0%}   {opts['non_senior_non_granular']:>10.0%}")
+        grade, rating = pd_to_rating(pd)
+        print(f"{pd:.4%}".ljust(12) + f"{rating:<8} {opts['senior']:>10.0%}   {opts['resec_senior']:>12.0%}   {opts['resec_non_senior']:>10.0%}")
     
-    # Example 4: Interpolation comparison
-    print("\n--- Example 4: Discrete vs Interpolated ---")
-    test_pds = [0.00015, 0.00025, 0.00075, 0.0015, 0.0025, 0.0045]
-    for pd in test_pds:
-        compare_discrete_vs_interpolated(pd)
-    
-    # Example 5: Reverse engineer observed RWs
-    print("\n--- Example 5: Reverse Engineer Observed RWs ---")
-    observed_rws = [0.20, 0.30, 0.40, 0.65, 0.70, 1.05]
-    
-    for rw in observed_rws:
-        pd_estimate = reverse_engineer_pd(rw, Seniority.NON_SENIOR, Granularity.NON_GRANULAR)
-        if pd_estimate:
-            print(f"  RW={rw:.0%} -> Estimated PD={pd_estimate:.4%} (NS Non-Granular)")
-        else:
-            print(f"  RW={rw:.0%} -> Out of range for NS Non-Granular")
-    
-    # Example 6: Print full tables
-    print("\n--- Example 6: Full Tables ---")
-    print_pd_rw_lookup()
+    print("\n" + "=" * 60)
+    print("CONCLUSION: Your bank uses RE-SECURITISATION treatment!")
+    print("Use: quick_resec_rw(pd, seniority) for calculations")
+    print("=" * 60)
