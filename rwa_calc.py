@@ -11,6 +11,250 @@ Allows comparison between approaches.
 
 import math
 from scipy.stats import norm
+from dataclasses import dataclass
+from typing import Optional
+
+
+# =============================================================================
+# Maturity Configuration (for flexible maturity handling)
+# =============================================================================
+
+@dataclass
+class MaturityConfig:
+    """
+    Flexible maturity configuration for IRB calculations.
+
+    Allows overriding default maturity handling for different exposure types
+    and regulatory treatments.
+
+    Attributes:
+    -----------
+    effective_maturity : float
+        The M value to use (if None, uses the maturity parameter directly)
+    maturity_floor : float
+        Minimum maturity in years (default: 1.0, but 0 for some repo-style)
+    maturity_cap : float
+        Maximum maturity in years (default: 5.0)
+    apply_maturity_adjustment : bool
+        Whether to apply the b(PD) maturity adjustment (False for retail)
+    maturity_adjustment_override : float
+        Direct override of the b factor (if None, calculated from PD)
+    maturity_scaling_factor : float
+        Multiplier on the maturity adjustment (default: 1.0)
+    reference_maturity : float
+        Reference maturity for adjustment formula (default: 2.5 years)
+    """
+    effective_maturity: Optional[float] = None
+    maturity_floor: float = 1.0
+    maturity_cap: float = 5.0
+    apply_maturity_adjustment: bool = True
+    maturity_adjustment_override: Optional[float] = None
+    maturity_scaling_factor: float = 1.0
+    reference_maturity: float = 2.5
+
+
+# Pre-defined maturity configurations for common exposure types
+MATURITY_CONFIGS = {
+    # Standard corporate - uses default 1y floor, 5y cap
+    "corporate": MaturityConfig(),
+
+    # F-IRB fixed maturity at 2.5 years
+    "firb_fixed": MaturityConfig(effective_maturity=2.5),
+
+    # Repo-style transactions - can have 0 floor
+    "repo_style": MaturityConfig(maturity_floor=0.0),
+
+    # Short-term self-liquidating trade finance
+    "trade_finance": MaturityConfig(maturity_floor=0.0, maturity_cap=1.0),
+
+    # Retail - no maturity adjustment
+    "retail": MaturityConfig(apply_maturity_adjustment=False),
+
+    # SME with reduced maturity sensitivity
+    "sme": MaturityConfig(maturity_scaling_factor=0.75),
+
+    # Project finance - often longer maturities
+    "project_finance": MaturityConfig(maturity_cap=7.0),
+
+    # Revolving facilities - fixed at 2.5
+    "revolving": MaturityConfig(effective_maturity=2.5),
+
+    # Specialized lending
+    "specialized_lending": MaturityConfig(maturity_cap=7.0, maturity_scaling_factor=0.85),
+}
+
+
+def get_effective_maturity(
+    maturity: float,
+    config: MaturityConfig = None
+) -> float:
+    """
+    Get effective maturity after applying floor and cap.
+
+    Parameters:
+    -----------
+    maturity : float
+        Input maturity in years
+    config : MaturityConfig
+        Configuration with floor/cap settings
+
+    Returns:
+    --------
+    float
+        Effective maturity
+    """
+    if config is None:
+        config = MaturityConfig()
+
+    # Use override if specified
+    if config.effective_maturity is not None:
+        return config.effective_maturity
+
+    # Apply floor and cap
+    m = max(maturity, config.maturity_floor)
+    m = min(m, config.maturity_cap)
+
+    return m
+
+
+# =============================================================================
+# Regulatory Floors and Validation Constants
+# =============================================================================
+
+# PD floors by asset class (CRE31.6, Basel IV)
+PD_FLOORS = {
+    "corporate": 0.0003,        # 3bps
+    "bank": 0.0003,             # 3bps
+    "sovereign": 0.0003,        # 3bps
+    "sme_corporate": 0.0003,    # 3bps
+    "retail_mortgage": 0.0005,  # 5bps (Basel IV)
+    "retail_revolving": 0.0005, # 5bps (Basel IV)
+    "retail_other": 0.0005,     # 5bps (Basel IV)
+    "hvcre": 0.0003,            # 3bps for HVCRE
+    "specialized_lending": 0.0003,
+}
+
+# LGD floors for A-IRB (CRE32.7-8, Basel IV)
+LGD_FLOORS = {
+    "senior_secured_financial": 0.0,    # 0% for financial collateral
+    "senior_secured_receivables": 0.10, # 10%
+    "senior_secured_cre": 0.10,         # 10% for commercial RE
+    "senior_secured_rre": 0.10,         # 10% for residential RE
+    "senior_secured_other": 0.15,       # 15% for other physical
+    "senior_unsecured": 0.25,           # 25%
+    "subordinated": 0.25,               # 25%
+    "retail_secured_rre": 0.05,         # 5% for residential mortgage
+    "retail_secured_other": 0.10,       # 10%
+    "retail_unsecured": 0.30,           # 30% (Basel IV)
+    "retail_revolving": 0.50,           # 50% for QRRE
+}
+
+# EAD floors (as percentage of committed amount)
+EAD_FLOORS = {
+    "retail_revolving": 0.50,  # 50% CCF floor for QRRE
+}
+
+# Credit Conversion Factors for off-balance sheet (CRE32.26-41)
+CCF_TABLE = {
+    # Commitment Type: (SA CCF, F-IRB CCF, A-IRB estimate allowed)
+    "unconditionally_cancellable": (0.10, 0.10, False),   # 10% - UCC
+    "conditionally_cancellable": (0.40, 0.40, True),      # 40%
+    "short_term_trade": (0.20, 0.20, False),              # 20% - trade finance
+    "transaction_related": (0.50, 0.50, True),            # 50%
+    "note_issuance": (0.50, 0.50, True),                  # 50% - NIF/RUF
+    "committed_revolving": (0.40, 0.75, True),            # 40% SA, 75% IRB
+    "other_commitments": (0.40, 0.75, True),              # 40% SA, 75% IRB
+    "direct_credit_substitute": (1.00, 1.00, False),      # 100%
+    "repo_style": (1.00, 1.00, False),                    # 100%
+    "securities_lending": (1.00, 1.00, False),            # 100%
+    "forward_asset_purchase": (1.00, 1.00, True),         # 100%
+    "unpaid_portion_commitments": (1.00, 1.00, False),    # 100%
+}
+
+# Valid asset classes for validation
+VALID_ASSET_CLASSES = {
+    "corporate", "bank", "sovereign", "sme_corporate",
+    "retail_mortgage", "retail_revolving", "retail_other",
+    "hvcre", "specialized_lending", "pse", "mdb",
+}
+
+# Valid SA exposure classes
+VALID_SA_EXPOSURE_CLASSES = {
+    "sovereign", "pse", "mdb", "bank", "securities_firm",
+    "corporate", "sme_corporate", "retail", "residential_re",
+    "commercial_re", "adc", "defaulted", "equity", "subordinated",
+    "covered_bond", "purchased_receivables",
+}
+
+
+# =============================================================================
+# Supervisory Haircuts for CRM (CRE22.39-52)
+# =============================================================================
+
+SUPERVISORY_HAIRCUTS = {
+    # Collateral type: (Hc haircut, He haircut for exposure)
+    # Hc = collateral haircut, He = exposure haircut (for repo-style)
+
+    # Cash and cash equivalents
+    "cash": (0.0, 0.0),
+    "cash_equivalent": (0.0, 0.0),
+
+    # Sovereign debt (by rating and residual maturity)
+    "sovereign_aaa_1y": (0.005, 0.0),   # 0.5%
+    "sovereign_aaa_5y": (0.02, 0.0),    # 2%
+    "sovereign_aaa_5y+": (0.04, 0.0),   # 4%
+    "sovereign_aa_1y": (0.01, 0.0),     # 1%
+    "sovereign_aa_5y": (0.03, 0.0),     # 3%
+    "sovereign_aa_5y+": (0.06, 0.0),    # 6%
+    "sovereign_a_bbb_1y": (0.015, 0.0), # 1.5%
+    "sovereign_a_bbb_5y": (0.04, 0.0),  # 4%
+    "sovereign_a_bbb_5y+": (0.08, 0.0), # 8%
+    "sovereign_bb_1y": (0.15, 0.0),     # 15%
+    "sovereign_bb_5y": (0.15, 0.0),
+    "sovereign_bb_5y+": (0.15, 0.0),
+
+    # Corporate/bank debt (by rating and residual maturity)
+    "corporate_aaa_1y": (0.01, 0.0),    # 1%
+    "corporate_aaa_5y": (0.04, 0.0),    # 4%
+    "corporate_aaa_5y+": (0.08, 0.0),   # 8%
+    "corporate_aa_a_1y": (0.02, 0.0),   # 2%
+    "corporate_aa_a_5y": (0.06, 0.0),   # 6%
+    "corporate_aa_a_5y+": (0.12, 0.0),  # 12%
+    "corporate_bbb_1y": (0.10, 0.0),    # 10%
+    "corporate_bbb_5y": (0.12, 0.0),    # 12%
+    "corporate_bbb_5y+": (0.20, 0.0),   # 20%
+    "corporate_bb_1y": (0.15, 0.0),     # 15%
+    "corporate_bb_5y+": (0.25, 0.0),    # 25%
+
+    # Securitization positions (by rating)
+    "securitization_aaa_aa": (0.04, 0.0),  # 4%
+    "securitization_a_bbb": (0.08, 0.0),   # 8%
+    "securitization_bb": (0.16, 0.0),      # 16%
+
+    # Equity
+    "equity_main_index": (0.15, 0.0),      # 15%
+    "equity_other_listed": (0.25, 0.0),    # 25%
+    "equity_other": (0.25, 0.0),           # 25%
+
+    # Gold
+    "gold": (0.15, 0.0),                   # 15%
+
+    # Other collateral
+    "mutual_fund": (0.25, 0.0),            # 25% (or look-through)
+    "real_estate": (0.30, 0.0),            # 30% (simplified)
+    "receivables": (0.20, 0.0),            # 20%
+    "other_physical": (0.25, 0.0),         # 25%
+}
+
+# FX mismatch haircut (CRE22.54)
+FX_MISMATCH_HAIRCUT = 0.08  # 8%
+
+# Holding period scaling factors (CRE22.56)
+HOLDING_PERIOD_SCALING = {
+    "repo_style": 1.0,        # 5 business days base
+    "other_capital_market": 2.0,  # 10 business days
+    "secured_lending": 4.47,  # 20 business days (sqrt(20/5))
+}
 
 
 # =============================================================================
@@ -26,6 +270,64 @@ SA_SOVEREIGN_RW = {
     "B+": 100, "B": 100, "B-": 100,
     "below_B-": 150,
     "unrated": 100,
+}
+
+# Public Sector Entity (PSE) risk weights (CRE20.10-15)
+# Option A: One category below sovereign (used here)
+# Option B: Same as banks
+SA_PSE_RW = {
+    "AAA": 20, "AA+": 20, "AA": 20, "AA-": 20,  # Sovereign 0% -> PSE 20%
+    "A+": 50, "A": 50, "A-": 50,                 # Sovereign 20% -> PSE 50%
+    "BBB+": 100, "BBB": 100, "BBB-": 100,        # Sovereign 50% -> PSE 100%
+    "BB+": 100, "BB": 100, "BB-": 100,
+    "B+": 100, "B": 100, "B-": 100,
+    "below_B-": 150,
+    "unrated": 100,
+}
+
+# PSE domestic currency exposures (may get sovereign treatment)
+SA_PSE_DOMESTIC_RW = SA_SOVEREIGN_RW.copy()
+
+# Multilateral Development Banks (MDB) risk weights (CRE20.12-13)
+# Qualifying MDBs get 0% RW, others treated as banks
+SA_MDB_RW = {
+    # Qualifying MDBs (listed in CRE20.13)
+    "qualifying": 0,
+    # Non-qualifying MDBs - treated as banks
+    "AAA": 20, "AA+": 20, "AA": 20, "AA-": 20,
+    "A+": 30, "A": 30, "A-": 30,
+    "BBB+": 50, "BBB": 50, "BBB-": 50,
+    "BB+": 100, "BB": 100, "BB-": 100,
+    "B+": 100, "B": 100, "B-": 100,
+    "below_B-": 150,
+    "unrated": 50,
+}
+
+# List of qualifying MDBs that get 0% RW
+QUALIFYING_MDBS = {
+    "IBRD",  # World Bank
+    "IFC",   # International Finance Corporation
+    "ADB",   # Asian Development Bank
+    "AfDB",  # African Development Bank
+    "EBRD",  # European Bank for Reconstruction and Development
+    "IADB",  # Inter-American Development Bank
+    "EIB",   # European Investment Bank
+    "NIB",   # Nordic Investment Bank
+    "CDB",   # Caribbean Development Bank
+    "IsDB",  # Islamic Development Bank
+    "AIIB",  # Asian Infrastructure Investment Bank
+    "NDB",   # New Development Bank (BRICS)
+}
+
+# Covered Bonds risk weights (CRE20.45-46)
+SA_COVERED_BOND_RW = {
+    "AAA": 10, "AA+": 10, "AA": 10, "AA-": 10,
+    "A+": 20, "A": 20, "A-": 20,
+    "BBB+": 20, "BBB": 20, "BBB-": 20,
+    "BB+": 50, "BB": 50, "BB-": 50,
+    "B+": 100, "B": 100, "B-": 100,
+    "below_B-": 100,
+    "unrated": 100,  # Or based on issuing bank
 }
 
 # Bank risk weights - External Credit Risk Assessment (ECRA) approach (CRE20.16)
@@ -62,6 +364,9 @@ SA_BANK_SCRA_SHORT_TERM_RW = {
     "B": 50,
     "C": 150,
 }
+
+# Securities firms (CRE20.20) - treated as banks if equivalent regulation
+SA_SECURITIES_FIRM_RW = SA_BANK_ECRA_RW.copy()
 
 # Corporate risk weights based on external ratings (CRE20.25)
 SA_CORPORATE_RW = {
@@ -111,10 +416,143 @@ SA_DEFAULTED_RW = {
     "secured_residential": 100,  # if specific provisions >= 20%
 }
 
+# Acquisition, Development and Construction (ADC) exposures (CRE20.91-93)
+SA_ADC_RW = {
+    "residential_presold": 100,   # Pre-sold/pre-leased residential
+    "residential_other": 150,     # Other residential ADC
+    "commercial": 150,            # Commercial ADC
+}
+
+# Purchased Receivables - Dilution Risk (CRE20.59-70)
+SA_PURCHASED_RECEIVABLES_RW = {
+    "corporate": 100,      # Unrated corporate receivables
+    "retail": 75,          # Retail receivables meeting criteria
+    "dilution_risk": 100,  # For dilution risk component
+}
+
 
 def get_sa_sovereign_rw(rating: str = "unrated") -> float:
     """Get SA risk weight for sovereign exposures."""
     return SA_SOVEREIGN_RW.get(rating, SA_SOVEREIGN_RW.get("unrated", 100))
+
+
+def get_sa_pse_rw(
+    rating: str = "unrated",
+    domestic_currency: bool = False,
+    revenue_raising_power: bool = False
+) -> float:
+    """
+    Get SA risk weight for Public Sector Entity exposures.
+
+    Parameters:
+    -----------
+    rating : str
+        External rating (based on sovereign rating)
+    domestic_currency : bool
+        True if exposure is in domestic currency and funded domestically
+    revenue_raising_power : bool
+        True if PSE has independent revenue-raising power
+
+    Returns:
+    --------
+    float
+        Risk weight (%)
+    """
+    # PSEs with domestic currency funding may get sovereign treatment
+    if domestic_currency and revenue_raising_power:
+        return SA_PSE_DOMESTIC_RW.get(rating, 100)
+
+    return SA_PSE_RW.get(rating, 100)
+
+
+def get_sa_mdb_rw(
+    mdb_name: str = None,
+    rating: str = "unrated"
+) -> float:
+    """
+    Get SA risk weight for Multilateral Development Bank exposures.
+
+    Parameters:
+    -----------
+    mdb_name : str
+        Name/code of the MDB (e.g., "IBRD", "EIB")
+    rating : str
+        External rating (for non-qualifying MDBs)
+
+    Returns:
+    --------
+    float
+        Risk weight (%)
+    """
+    # Qualifying MDBs get 0% RW
+    if mdb_name and mdb_name.upper() in QUALIFYING_MDBS:
+        return 0
+
+    # Non-qualifying MDBs treated as banks
+    return SA_MDB_RW.get(rating, 50)
+
+
+def get_sa_covered_bond_rw(
+    rating: str = "unrated",
+    issuer_rw: float = None
+) -> float:
+    """
+    Get SA risk weight for covered bond exposures.
+
+    Parameters:
+    -----------
+    rating : str
+        External rating of covered bond
+    issuer_rw : float
+        Risk weight of issuing bank (for unrated bonds)
+
+    Returns:
+    --------
+    float
+        Risk weight (%)
+    """
+    if rating != "unrated":
+        return SA_COVERED_BOND_RW.get(rating, 100)
+
+    # Unrated: based on issuing bank's RW
+    if issuer_rw is not None:
+        if issuer_rw <= 20:
+            return 10
+        elif issuer_rw <= 50:
+            return 20
+        elif issuer_rw <= 100:
+            return 50
+        else:
+            return 100
+
+    return 100
+
+
+def get_sa_adc_rw(
+    adc_type: str = "commercial",
+    presold: bool = False
+) -> float:
+    """
+    Get SA risk weight for ADC (Acquisition, Development, Construction) exposures.
+
+    Parameters:
+    -----------
+    adc_type : str
+        "residential" or "commercial"
+    presold : bool
+        True if property is pre-sold or pre-leased
+
+    Returns:
+    --------
+    float
+        Risk weight (%)
+    """
+    if adc_type == "residential":
+        if presold:
+            return SA_ADC_RW["residential_presold"]
+        return SA_ADC_RW["residential_other"]
+
+    return SA_ADC_RW["commercial"]
 
 
 def get_sa_bank_rw(
@@ -169,15 +607,40 @@ def get_sa_corporate_rw(
     return base_rw
 
 
-def get_sa_retail_rw(retail_type: str = "regulatory_retail") -> float:
-    """Get SA risk weight for retail exposures."""
-    return SA_RETAIL_RW.get(retail_type, 75)
+def get_sa_retail_rw(
+    retail_type: str = "regulatory_retail",
+    currency_mismatch: bool = False
+) -> float:
+    """
+    Get SA risk weight for retail exposures.
+
+    Parameters:
+    -----------
+    retail_type : str
+        "regulatory_retail" or "transactor"
+    currency_mismatch : bool
+        True if loan currency differs from borrower income currency
+        (CRE20.97 - 50% add-on for unhedged retail)
+
+    Returns:
+    --------
+    float
+        Risk weight (%)
+    """
+    base_rw = SA_RETAIL_RW.get(retail_type, 75)
+
+    # Currency mismatch add-on (CRE20.97)
+    if currency_mismatch:
+        return min(base_rw * 1.5, 150)
+
+    return base_rw
 
 
 def get_sa_real_estate_rw(
     ltv: float,
     property_type: str = "residential",
-    income_producing: bool = False
+    income_producing: bool = False,
+    currency_mismatch: bool = False
 ) -> float:
     """
     Get SA risk weight for real estate exposures based on LTV.
@@ -190,6 +653,14 @@ def get_sa_real_estate_rw(
         "residential" or "commercial"
     income_producing : bool
         True if repayment depends on cash flows from property
+    currency_mismatch : bool
+        True if loan currency differs from borrower income currency
+        (CRE20.97 - 50% add-on for unhedged residential mortgages)
+
+    Returns:
+    --------
+    float
+        Risk weight (%)
     """
     ltv_pct = ltv * 100 if ltv <= 1 else ltv  # Handle both 0.75 and 75 formats
 
@@ -207,7 +678,13 @@ def get_sa_real_estate_rw(
         else:
             rw = SA_RESIDENTIAL_RE_RW["ltv_above_100"]
 
-        return rw[1] if income_producing else rw[0]
+        base_rw = rw[1] if income_producing else rw[0]
+
+        # Currency mismatch add-on (CRE20.97) - only for residential
+        if currency_mismatch:
+            return min(base_rw * 1.5, 150)
+
+        return base_rw
 
     else:  # commercial
         if ltv_pct <= 60:
@@ -232,16 +709,21 @@ def calculate_sa_rwa(
     ead : float
         Exposure at Default
     exposure_class : str
-        One of: "sovereign", "bank", "corporate", "retail", "residential_re",
-        "commercial_re", "defaulted", "equity"
+        One of: "sovereign", "pse", "mdb", "bank", "securities_firm", "corporate",
+        "sme_corporate", "retail", "residential_re", "commercial_re", "adc",
+        "defaulted", "equity", "subordinated", "covered_bond"
     rating : str
         External credit rating (where applicable)
     **kwargs : dict
         Additional parameters depending on exposure class:
         - bank: approach, scra_grade, short_term
-        - corporate: is_sme
-        - retail: retail_type
-        - real_estate: ltv, income_producing
+        - corporate/sme_corporate: is_sme
+        - retail: retail_type, currency_mismatch
+        - real_estate: ltv, income_producing, currency_mismatch
+        - pse: domestic_currency, revenue_raising_power
+        - mdb: mdb_name
+        - covered_bond: issuer_rw
+        - adc: adc_type, presold
 
     Returns:
     --------
@@ -251,6 +733,19 @@ def calculate_sa_rwa(
     if exposure_class == "sovereign":
         risk_weight = get_sa_sovereign_rw(rating)
 
+    elif exposure_class == "pse":
+        risk_weight = get_sa_pse_rw(
+            rating=rating,
+            domestic_currency=kwargs.get("domestic_currency", False),
+            revenue_raising_power=kwargs.get("revenue_raising_power", False)
+        )
+
+    elif exposure_class == "mdb":
+        risk_weight = get_sa_mdb_rw(
+            mdb_name=kwargs.get("mdb_name"),
+            rating=rating
+        )
+
     elif exposure_class == "bank":
         risk_weight = get_sa_bank_rw(
             rating=rating,
@@ -259,26 +754,45 @@ def calculate_sa_rwa(
             short_term=kwargs.get("short_term", False)
         )
 
-    elif exposure_class == "corporate":
+    elif exposure_class == "securities_firm":
+        # Securities firms with equivalent regulation treated as banks
+        risk_weight = get_sa_bank_rw(
+            rating=rating,
+            approach=kwargs.get("approach", "ECRA"),
+            scra_grade=kwargs.get("scra_grade", "B"),
+            short_term=kwargs.get("short_term", False)
+        )
+
+    elif exposure_class in ("corporate", "sme_corporate"):
         risk_weight = get_sa_corporate_rw(
             rating=rating,
-            is_sme=kwargs.get("is_sme", False)
+            is_sme=(exposure_class == "sme_corporate" or kwargs.get("is_sme", False))
         )
 
     elif exposure_class == "retail":
-        risk_weight = get_sa_retail_rw(kwargs.get("retail_type", "regulatory_retail"))
+        risk_weight = get_sa_retail_rw(
+            retail_type=kwargs.get("retail_type", "regulatory_retail"),
+            currency_mismatch=kwargs.get("currency_mismatch", False)
+        )
 
     elif exposure_class == "residential_re":
         risk_weight = get_sa_real_estate_rw(
             ltv=kwargs.get("ltv", 0.80),
             property_type="residential",
-            income_producing=kwargs.get("income_producing", False)
+            income_producing=kwargs.get("income_producing", False),
+            currency_mismatch=kwargs.get("currency_mismatch", False)
         )
 
     elif exposure_class == "commercial_re":
         risk_weight = get_sa_real_estate_rw(
             ltv=kwargs.get("ltv", 0.80),
             property_type="commercial"
+        )
+
+    elif exposure_class == "adc":
+        risk_weight = get_sa_adc_rw(
+            adc_type=kwargs.get("adc_type", "commercial"),
+            presold=kwargs.get("presold", False)
         )
 
     elif exposure_class == "defaulted":
@@ -291,8 +805,18 @@ def calculate_sa_rwa(
         equity_type = kwargs.get("equity_type", "other")
         risk_weight = SA_EQUITY_RW.get(equity_type, 250)
 
+    elif exposure_class == "subordinated":
+        risk_weight = SA_SUBORDINATED_RW
+
+    elif exposure_class == "covered_bond":
+        risk_weight = get_sa_covered_bond_rw(
+            rating=rating,
+            issuer_rw=kwargs.get("issuer_rw")
+        )
+
     else:
-        raise ValueError(f"Unknown exposure class: {exposure_class}")
+        raise ValueError(f"Unknown exposure class: {exposure_class}. "
+                        f"Valid classes: {VALID_SA_EXPOSURE_CLASSES}")
 
     rwa = ead * risk_weight / 100
 
@@ -1239,7 +1763,8 @@ def calculate_sec_sa_rwa(
     n: int = 25,
     lgd: float = 0.50,
     w: float = 0.0,
-    is_sts: bool = False
+    is_sts: bool = False,
+    is_resecuritization: bool = False
 ) -> dict:
     """
     Calculate RWA using SEC-SA (Standardised Approach for Securitizations).
@@ -1264,6 +1789,8 @@ def calculate_sec_sa_rwa(
         Ratio of delinquent exposures
     is_sts : bool
         True if STS securitization
+    is_resecuritization : bool
+        True if this is a re-securitization (CRE40.68-73)
 
     Returns:
     --------
@@ -1288,6 +1815,13 @@ def calculate_sec_sa_rwa(
         is_sts=is_sts
     )
 
+    # Apply re-securitization treatment (CRE40.68-73)
+    resec_adjustment = 1.0
+    if is_resecuritization:
+        # Re-securitization: 100% floor and 1.5x multiplier
+        risk_weight = max(risk_weight * 1.5, 100)
+        resec_adjustment = 1.5
+
     # Calculate RWA
     rwa = ead * risk_weight / 100
 
@@ -1305,6 +1839,8 @@ def calculate_sec_sa_rwa(
         "lgd": lgd,
         "w": w,
         "is_sts": is_sts,
+        "is_resecuritization": is_resecuritization,
+        "resec_adjustment": resec_adjustment,
         "risk_weight_pct": risk_weight,
         "rwa": rwa,
         "capital_requirement_k": risk_weight / 100 / 12.5,
@@ -1407,7 +1943,8 @@ def calculate_sec_irba_rwa(
     underlying_exposures: list[dict] = None,
     n: int = 25,
     lgd: float = 0.50,
-    is_sts: bool = False
+    is_sts: bool = False,
+    is_resecuritization: bool = False
 ) -> dict:
     """
     Calculate RWA using SEC-IRBA (IRB Approach for Securitizations).
@@ -1430,6 +1967,8 @@ def calculate_sec_irba_rwa(
         Average LGD of pool
     is_sts : bool
         Whether STS securitization
+    is_resecuritization : bool
+        True if this is a re-securitization (CRE40.68-73)
 
     Returns:
     --------
@@ -1446,6 +1985,13 @@ def calculate_sec_irba_rwa(
     # Calculate risk weight
     risk_weight = calculate_sec_irba_rw(kirb, attachment, detachment, n, lgd, is_sts)
 
+    # Apply re-securitization treatment (CRE40.68-73)
+    resec_adjustment = 1.0
+    if is_resecuritization:
+        # Re-securitization: 100% floor and 1.5x multiplier
+        risk_weight = max(risk_weight * 1.5, 100)
+        resec_adjustment = 1.5
+
     # Calculate RWA
     rwa = ead * risk_weight / 100
 
@@ -1459,9 +2005,131 @@ def calculate_sec_irba_rwa(
         "n": n,
         "lgd": lgd,
         "is_sts": is_sts,
+        "is_resecuritization": is_resecuritization,
+        "resec_adjustment": resec_adjustment,
         "risk_weight_pct": risk_weight,
         "rwa": rwa,
         "capital_requirement_k": risk_weight / 100 / 12.5,
+    }
+
+
+def determine_securitization_approach(
+    pool_is_irb_eligible: bool,
+    has_external_rating: bool,
+    tranche_is_rated: bool,
+    has_iaa_approval: bool = False,
+    is_abcp: bool = False
+) -> dict:
+    """
+    Determine which securitization approach to use based on regulatory hierarchy (CRE40.5-7).
+
+    The hierarchy is mandatory:
+    1. SEC-IRBA (if pool is IRB-eligible and bank has data)
+    2. SEC-ERBA (if external ratings available)
+    3. SEC-SA (fallback)
+    4. IAA (for ABCP with supervisory approval)
+
+    Parameters:
+    -----------
+    pool_is_irb_eligible : bool
+        True if underlying pool can be treated under IRB
+    has_external_rating : bool
+        True if the tranche has an external rating
+    tranche_is_rated : bool
+        True if tranche is rated by eligible ECAI
+    has_iaa_approval : bool
+        True if bank has supervisory approval for IAA
+    is_abcp : bool
+        True if this is an ABCP exposure
+
+    Returns:
+    --------
+    dict
+        Dictionary with approach and rationale
+    """
+    approach = None
+    rationale = []
+    alternatives = []
+
+    # Check hierarchy
+    if pool_is_irb_eligible:
+        approach = "SEC-IRBA"
+        rationale.append("Pool is IRB-eligible, SEC-IRBA is mandatory")
+    elif has_external_rating and tranche_is_rated:
+        approach = "SEC-ERBA"
+        rationale.append("Tranche has external rating, SEC-ERBA applies")
+        if pool_is_irb_eligible:
+            alternatives.append("SEC-IRBA would be required if pool IRB-eligible")
+    elif is_abcp and has_iaa_approval:
+        approach = "IAA"
+        rationale.append("ABCP exposure with IAA approval")
+    else:
+        approach = "SEC-SA"
+        rationale.append("Fallback to SEC-SA (no IRB eligibility or external rating)")
+
+    return {
+        "approach": approach,
+        "rationale": rationale,
+        "alternatives": alternatives,
+        "inputs": {
+            "pool_is_irb_eligible": pool_is_irb_eligible,
+            "has_external_rating": has_external_rating,
+            "tranche_is_rated": tranche_is_rated,
+            "has_iaa_approval": has_iaa_approval,
+            "is_abcp": is_abcp,
+        },
+    }
+
+
+def apply_securitization_cap(
+    tranche_rwa: float,
+    pool_total_rwa: float,
+    tranche_ead: float,
+    pool_total_ead: float
+) -> dict:
+    """
+    Apply maximum capital requirement cap (CRE40.19).
+
+    Tranche RWA is capped at its pro-rata share of pool RWA.
+
+    Parameters:
+    -----------
+    tranche_rwa : float
+        Calculated RWA for the tranche
+    pool_total_rwa : float
+        Total RWA of underlying pool
+    tranche_ead : float
+        EAD of the tranche
+    pool_total_ead : float
+        Total EAD of underlying pool
+
+    Returns:
+    --------
+    dict
+        Dictionary with capped RWA and components
+    """
+    # Calculate pro-rata cap
+    if pool_total_ead > 0:
+        pro_rata_share = tranche_ead / pool_total_ead
+        pro_rata_cap = pool_total_rwa * pro_rata_share
+    else:
+        pro_rata_cap = tranche_rwa  # No cap if pool EAD is 0
+
+    # Apply cap
+    capped_rwa = min(tranche_rwa, pro_rata_cap)
+    cap_binding = capped_rwa < tranche_rwa
+    cap_benefit = tranche_rwa - capped_rwa
+
+    return {
+        "tranche_rwa_uncapped": tranche_rwa,
+        "pool_total_rwa": pool_total_rwa,
+        "tranche_ead": tranche_ead,
+        "pool_total_ead": pool_total_ead,
+        "pro_rata_share": pro_rata_share if pool_total_ead > 0 else 0,
+        "pro_rata_cap": pro_rata_cap,
+        "capped_rwa": capped_rwa,
+        "cap_binding": cap_binding,
+        "cap_benefit": cap_benefit,
     }
 
 
@@ -1744,15 +2412,69 @@ def compare_batch_erba_vs_irb(exposures: list[dict]) -> dict:
     }
 
 
-def calculate_correlation(pd: float, asset_class: str = "corporate") -> float:
+def calculate_sme_correlation_adjustment(sales_eur_millions: float) -> float:
+    """
+    Calculate SME firm-size adjustment to correlation (CRE31.8).
+
+    For SME corporates with annual sales between EUR 5-50 million,
+    correlation is reduced by up to 4 percentage points.
+
+    Formula: Adjustment = 0.04 × (1 - (min(max(S, 5), 50) - 5) / 45)
+
+    Parameters:
+    -----------
+    sales_eur_millions : float
+        Annual sales in EUR millions
+
+    Returns:
+    --------
+    float
+        Correlation adjustment (to be subtracted from base R)
+    """
+    if sales_eur_millions is None or sales_eur_millions >= 50:
+        return 0.0
+
+    # Cap at 5-50 range
+    sales_adj = max(min(sales_eur_millions, 50), 5)
+
+    # Adjustment ranges from 0.04 (at 5m) to 0 (at 50m)
+    adjustment = 0.04 * (1 - (sales_adj - 5) / 45)
+
+    return adjustment
+
+
+def calculate_correlation(
+    pd: float,
+    asset_class: str = "corporate",
+    sales_turnover: float = None
+) -> float:
     """
     Calculate the asset correlation factor R based on PD and asset class.
 
     Basel II/III correlation formula for corporate exposures:
     R = 0.12 * (1 - exp(-50*PD)) / (1 - exp(-50)) + 0.24 * [1 - (1 - exp(-50*PD)) / (1 - exp(-50))]
+
+    For SME corporates (sales EUR 5-50m), correlation is reduced (CRE31.8).
+
+    Parameters:
+    -----------
+    pd : float
+        Probability of Default
+    asset_class : str
+        Asset class for correlation parameters
+    sales_turnover : float, optional
+        Annual sales turnover in EUR millions (for SME adjustment)
+
+    Returns:
+    --------
+    float
+        Asset correlation R
     """
-    if asset_class == "corporate":
+    if asset_class == "corporate" or asset_class == "sme_corporate":
         # Corporate, bank, sovereign exposures
+        r_min, r_max = 0.12, 0.24
+        k = 50
+    elif asset_class in ("bank", "sovereign"):
         r_min, r_max = 0.12, 0.24
         k = 50
     elif asset_class == "retail_mortgage":
@@ -1765,33 +2487,740 @@ def calculate_correlation(pd: float, asset_class: str = "corporate") -> float:
         # Other retail
         r_min, r_max = 0.03, 0.16
         k = 35
+    elif asset_class == "hvcre":
+        # High Volatility Commercial Real Estate - same as corporate
+        r_min, r_max = 0.12, 0.24
+        k = 50
     else:
-        raise ValueError(f"Unknown asset class: {asset_class}")
+        # Default to corporate parameters
+        r_min, r_max = 0.12, 0.24
+        k = 50
 
     # Basel correlation formula
     exp_factor = (1 - math.exp(-k * pd)) / (1 - math.exp(-k))
     correlation = r_min * exp_factor + r_max * (1 - exp_factor)
 
+    # Apply SME firm-size adjustment (CRE31.8)
+    if sales_turnover is not None and asset_class in ("corporate", "sme_corporate"):
+        sme_adjustment = calculate_sme_correlation_adjustment(sales_turnover)
+        correlation = max(correlation - sme_adjustment, r_min)
+
     return correlation
 
 
-def calculate_maturity_adjustment(pd: float) -> float:
+def calculate_maturity_adjustment(
+    pd: float,
+    config: MaturityConfig = None
+) -> float:
     """
     Calculate the maturity adjustment factor b(PD).
 
     b = (0.11852 - 0.05478 * ln(PD))^2
+
+    Parameters:
+    -----------
+    pd : float
+        Probability of Default
+    config : MaturityConfig
+        Optional configuration for overrides
+
+    Returns:
+    --------
+    float
+        Maturity adjustment factor b
     """
+    # Check for direct override
+    if config and config.maturity_adjustment_override is not None:
+        return config.maturity_adjustment_override
+
     # Floor PD to avoid log(0)
     pd = max(pd, 0.0001)
     b = (0.11852 - 0.05478 * math.log(pd)) ** 2
+
+    # Apply scaling factor if configured
+    if config and config.maturity_scaling_factor != 1.0:
+        b = b * config.maturity_scaling_factor
+
     return b
+
+
+# =============================================================================
+# LGD and EAD Floors and Adjustments
+# =============================================================================
+
+def apply_pd_floor(pd: float, asset_class: str = "corporate") -> float:
+    """
+    Apply regulatory PD floor based on asset class.
+
+    Parameters:
+    -----------
+    pd : float
+        Input probability of default
+    asset_class : str
+        Asset class for floor determination
+
+    Returns:
+    --------
+    float
+        PD with floor applied
+    """
+    floor = PD_FLOORS.get(asset_class, 0.0003)
+    return max(pd, floor)
+
+
+def apply_lgd_floor(
+    lgd: float,
+    collateral_type: str = "senior_unsecured",
+    asset_class: str = "corporate"
+) -> float:
+    """
+    Apply regulatory LGD floor for A-IRB (CRE32.7-8, Basel IV).
+
+    Parameters:
+    -----------
+    lgd : float
+        Bank-estimated LGD
+    collateral_type : str
+        Type of collateral/exposure for floor lookup
+    asset_class : str
+        Asset class (retail has different floors)
+
+    Returns:
+    --------
+    float
+        LGD with floor applied
+    """
+    # Determine floor based on collateral type and asset class
+    if asset_class.startswith("retail"):
+        if collateral_type == "secured_rre":
+            floor = LGD_FLOORS.get("retail_secured_rre", 0.05)
+        elif collateral_type == "secured_other":
+            floor = LGD_FLOORS.get("retail_secured_other", 0.10)
+        elif asset_class == "retail_revolving":
+            floor = LGD_FLOORS.get("retail_revolving", 0.50)
+        else:
+            floor = LGD_FLOORS.get("retail_unsecured", 0.30)
+    else:
+        floor = LGD_FLOORS.get(collateral_type, 0.25)
+
+    return max(lgd, floor)
+
+
+def estimate_downturn_lgd(
+    lgd_ttc: float,
+    asset_class: str = "corporate",
+    collateral_type: str = None
+) -> float:
+    """
+    Estimate downturn LGD from through-the-cycle LGD.
+
+    Banks must use downturn LGD for capital calculations (CRE36.87-90).
+    This provides a simple estimation; banks should use their own models.
+
+    Parameters:
+    -----------
+    lgd_ttc : float
+        Through-the-cycle LGD estimate
+    asset_class : str
+        Asset class
+    collateral_type : str
+        Type of collateral (affects downturn severity)
+
+    Returns:
+    --------
+    float
+        Estimated downturn LGD
+    """
+    # Typical downturn multipliers (banks should calibrate to their data)
+    DOWNTURN_MULTIPLIERS = {
+        "corporate": 1.25,
+        "sme_corporate": 1.20,
+        "bank": 1.20,
+        "sovereign": 1.10,
+        "retail_mortgage": 1.20,
+        "retail_revolving": 1.15,
+        "retail_other": 1.25,
+    }
+
+    # Collateral-specific adjustments
+    COLLATERAL_ADJUSTMENTS = {
+        "financial_collateral": 1.05,  # Liquid, less cyclical
+        "real_estate": 1.30,           # More cyclical
+        "receivables": 1.25,
+        "other_physical": 1.20,
+        "unsecured": 1.25,
+    }
+
+    base_multiplier = DOWNTURN_MULTIPLIERS.get(asset_class, 1.25)
+
+    if collateral_type:
+        collateral_adj = COLLATERAL_ADJUSTMENTS.get(collateral_type, 1.0)
+        # Blend the adjustments
+        multiplier = (base_multiplier + collateral_adj) / 2
+    else:
+        multiplier = base_multiplier
+
+    return min(lgd_ttc * multiplier, 1.0)
+
+
+def calculate_off_balance_sheet_ead(
+    committed_amount: float,
+    drawn_amount: float,
+    commitment_type: str = "other_commitments",
+    approach: str = "SA",
+    bank_ccf_estimate: float = None
+) -> dict:
+    """
+    Calculate EAD for off-balance sheet exposures using CCF (CRE32.26-41).
+
+    EAD = Drawn + CCF × (Committed - Drawn)
+
+    Parameters:
+    -----------
+    committed_amount : float
+        Total committed/limit amount
+    drawn_amount : float
+        Currently drawn amount
+    commitment_type : str
+        Type of commitment for CCF lookup
+    approach : str
+        "SA" for standardised CCF, "F-IRB" for foundation IRB CCF,
+        "A-IRB" for bank estimate (if allowed)
+    bank_ccf_estimate : float
+        Bank's own CCF estimate (for A-IRB where allowed)
+
+    Returns:
+    --------
+    dict
+        Dictionary with EAD and components
+    """
+    ccf_entry = CCF_TABLE.get(commitment_type, (0.50, 0.75, True))
+    sa_ccf, firb_ccf, airb_allowed = ccf_entry
+
+    # Determine CCF to use
+    if approach == "SA":
+        ccf = sa_ccf
+    elif approach == "F-IRB":
+        ccf = firb_ccf
+    elif approach == "A-IRB":
+        if airb_allowed and bank_ccf_estimate is not None:
+            ccf = bank_ccf_estimate
+        else:
+            ccf = firb_ccf  # Fall back to F-IRB
+    else:
+        ccf = sa_ccf
+
+    # Calculate undrawn portion
+    undrawn = max(0, committed_amount - drawn_amount)
+
+    # Calculate EAD
+    ead = drawn_amount + (undrawn * ccf)
+
+    return {
+        "committed_amount": committed_amount,
+        "drawn_amount": drawn_amount,
+        "undrawn_amount": undrawn,
+        "ccf": ccf,
+        "ccf_approach": approach,
+        "commitment_type": commitment_type,
+        "ead": ead,
+        "ead_from_drawn": drawn_amount,
+        "ead_from_undrawn": undrawn * ccf,
+    }
+
+
+# =============================================================================
+# Credit Risk Mitigation (CRM) - CRE22
+# =============================================================================
+
+def get_supervisory_haircut(
+    collateral_type: str,
+    holding_period: str = "repo_style"
+) -> dict:
+    """
+    Get supervisory haircuts for collateral (CRE22.39-52).
+
+    Parameters:
+    -----------
+    collateral_type : str
+        Type of collateral (e.g., "sovereign_aaa_1y", "equity_main_index")
+    holding_period : str
+        "repo_style" (5 days), "other_capital_market" (10 days),
+        "secured_lending" (20 days)
+
+    Returns:
+    --------
+    dict
+        Dictionary with Hc (collateral haircut), He (exposure haircut)
+    """
+    base_haircuts = SUPERVISORY_HAIRCUTS.get(collateral_type, (0.25, 0.0))
+    hc_base, he_base = base_haircuts
+
+    # Scale for holding period (CRE22.56)
+    # Base is 10 business days for most, 5 for repo-style
+    scaling = HOLDING_PERIOD_SCALING.get(holding_period, 1.0)
+
+    hc = hc_base * scaling
+    he = he_base * scaling
+
+    return {
+        "Hc": hc,
+        "He": he,
+        "collateral_type": collateral_type,
+        "holding_period": holding_period,
+        "scaling_factor": scaling,
+    }
+
+
+def calculate_exposure_with_collateral(
+    ead: float,
+    collateral_value: float,
+    collateral_type: str,
+    fx_mismatch: bool = False,
+    holding_period: str = "secured_lending",
+    own_haircut_estimates: dict = None
+) -> dict:
+    """
+    Calculate net exposure after applying CRM with comprehensive approach (CRE22).
+
+    E* = max(0, E×(1+He) - C×(1-Hc-Hfx))
+
+    Parameters:
+    -----------
+    ead : float
+        Exposure at default (before CRM)
+    collateral_value : float
+        Market value of eligible collateral
+    collateral_type : str
+        Type of collateral for haircut lookup
+    fx_mismatch : bool
+        True if collateral currency differs from exposure currency
+    holding_period : str
+        Holding period for haircut scaling
+    own_haircut_estimates : dict
+        Bank's own haircut estimates (for own-estimate approach)
+
+    Returns:
+    --------
+    dict
+        Dictionary with net exposure and CRM benefit
+    """
+    # Get haircuts
+    if own_haircut_estimates:
+        hc = own_haircut_estimates.get("Hc", 0.0)
+        he = own_haircut_estimates.get("He", 0.0)
+    else:
+        haircuts = get_supervisory_haircut(collateral_type, holding_period)
+        hc = haircuts["Hc"]
+        he = haircuts["He"]
+
+    # FX mismatch haircut (CRE22.54)
+    hfx = FX_MISMATCH_HAIRCUT if fx_mismatch else 0.0
+
+    # Apply comprehensive approach formula
+    adjusted_exposure = ead * (1 + he)
+    adjusted_collateral = collateral_value * (1 - hc - hfx)
+
+    net_exposure = max(0, adjusted_exposure - adjusted_collateral)
+
+    # Calculate benefit
+    benefit = ead - net_exposure
+    benefit_pct = (benefit / ead * 100) if ead > 0 else 0
+
+    return {
+        "original_ead": ead,
+        "collateral_value": collateral_value,
+        "collateral_type": collateral_type,
+        "Hc": hc,
+        "He": he,
+        "Hfx": hfx,
+        "fx_mismatch": fx_mismatch,
+        "adjusted_exposure": adjusted_exposure,
+        "adjusted_collateral": adjusted_collateral,
+        "net_exposure": net_exposure,
+        "crm_benefit": benefit,
+        "crm_benefit_pct": benefit_pct,
+    }
+
+
+def calculate_exposure_with_guarantee(
+    ead: float,
+    guarantee_coverage: float,
+    guarantor_rw: float,
+    obligor_rw: float,
+    approach: str = "substitution"
+) -> dict:
+    """
+    Calculate exposure with unfunded credit protection (guarantees) (CRE22.70-84).
+
+    Parameters:
+    -----------
+    ead : float
+        Exposure at default
+    guarantee_coverage : float
+        Proportion of exposure covered by guarantee (0.0 to 1.0)
+    guarantor_rw : float
+        Risk weight applicable to guarantor
+    obligor_rw : float
+        Risk weight applicable to obligor
+    approach : str
+        "substitution" - covered portion gets guarantor RW
+        "double_default" - for eligible guarantors under IRB
+
+    Returns:
+    --------
+    dict
+        Dictionary with adjusted RWA
+    """
+    covered_portion = ead * guarantee_coverage
+    uncovered_portion = ead * (1 - guarantee_coverage)
+
+    if approach == "substitution":
+        # Simple substitution - covered part gets guarantor RW
+        rwa_covered = covered_portion * guarantor_rw / 100
+        rwa_uncovered = uncovered_portion * obligor_rw / 100
+        total_rwa = rwa_covered + rwa_uncovered
+
+        # Effective RW
+        effective_rw = (total_rwa / ead * 100) if ead > 0 else obligor_rw
+
+    else:
+        # For double-default, use separate function
+        rwa_covered = covered_portion * min(guarantor_rw, obligor_rw) / 100
+        rwa_uncovered = uncovered_portion * obligor_rw / 100
+        total_rwa = rwa_covered + rwa_uncovered
+        effective_rw = (total_rwa / ead * 100) if ead > 0 else obligor_rw
+
+    benefit = (ead * obligor_rw / 100) - total_rwa
+
+    return {
+        "ead": ead,
+        "guarantee_coverage": guarantee_coverage,
+        "covered_portion": covered_portion,
+        "uncovered_portion": uncovered_portion,
+        "guarantor_rw": guarantor_rw,
+        "obligor_rw": obligor_rw,
+        "approach": approach,
+        "rwa_covered": rwa_covered,
+        "rwa_uncovered": rwa_uncovered,
+        "total_rwa": total_rwa,
+        "effective_rw": effective_rw,
+        "crm_benefit": benefit,
+    }
+
+
+def calculate_double_default_pd(
+    pd_obligor: float,
+    pd_guarantor: float,
+    lgd_guarantor: float = 0.45,
+    correlation: float = 0.50
+) -> dict:
+    """
+    Calculate PD for double-default treatment (CRE36.99-105).
+
+    Applies when both obligor must default AND guarantor must fail to pay.
+    Eligible guarantors: banks, investment firms, insurance companies with
+    credit quality at least as good as A-.
+
+    Parameters:
+    -----------
+    pd_obligor : float
+        PD of the obligor
+    pd_guarantor : float
+        PD of the guarantor
+    lgd_guarantor : float
+        LGD applicable to guarantor (for recovery on guarantee)
+    correlation : float
+        Assumed correlation between obligor and guarantor default
+
+    Returns:
+    --------
+    dict
+        Dictionary with effective PD and components
+    """
+    # Simplified double-default formula
+    # In practice, Basel uses a more complex conditional formula
+    # Joint PD approximation considering correlation
+    # PD_joint = PD_o × PD_g × (1 + rho × (1-PD_o) × (1-PD_g) / (PD_o × PD_g))
+
+    # Simplified: use product with correlation adjustment
+    joint_pd_simple = pd_obligor * pd_guarantor
+
+    # More conservative approach including correlation
+    # Higher correlation = higher joint default probability
+    correlation_factor = 1 + correlation * min(pd_obligor, pd_guarantor)
+    joint_pd_adjusted = joint_pd_simple * correlation_factor
+
+    # Effective PD should still be floored
+    effective_pd = max(joint_pd_adjusted, 0.0003)
+
+    # Benefit vs treating as uncovered
+    pd_benefit = pd_obligor - effective_pd
+
+    return {
+        "pd_obligor": pd_obligor,
+        "pd_guarantor": pd_guarantor,
+        "lgd_guarantor": lgd_guarantor,
+        "correlation": correlation,
+        "joint_pd_simple": joint_pd_simple,
+        "joint_pd_adjusted": joint_pd_adjusted,
+        "effective_pd": effective_pd,
+        "pd_reduction": pd_benefit,
+        "pd_reduction_pct": (pd_benefit / pd_obligor * 100) if pd_obligor > 0 else 0,
+    }
+
+
+# =============================================================================
+# Output Floor (Basel IV) - CRE10
+# =============================================================================
+
+def apply_output_floor(
+    irb_rwa: float,
+    sa_rwa: float,
+    floor_percentage: float = 0.725
+) -> dict:
+    """
+    Apply Basel IV output floor (CRE10).
+
+    IRB RWA cannot be less than 72.5% of standardised RWA.
+    Floored RWA = max(IRB RWA, floor% × SA RWA)
+
+    Parameters:
+    -----------
+    irb_rwa : float
+        RWA calculated under IRB approach
+    sa_rwa : float
+        RWA calculated under Standardised Approach
+    floor_percentage : float
+        Output floor percentage (default 72.5% per Basel IV)
+
+    Returns:
+    --------
+    dict
+        Dictionary with floored RWA and components
+    """
+    floor_rwa = sa_rwa * floor_percentage
+    floored_rwa = max(irb_rwa, floor_rwa)
+
+    floor_binding = floored_rwa > irb_rwa
+    floor_add_on = max(0, floor_rwa - irb_rwa)
+
+    # Calculate capital impact
+    irb_capital = irb_rwa * 0.08
+    floored_capital = floored_rwa * 0.08
+    capital_add_on = floor_add_on * 0.08
+
+    return {
+        "irb_rwa": irb_rwa,
+        "sa_rwa": sa_rwa,
+        "floor_percentage": floor_percentage,
+        "floor_rwa": floor_rwa,
+        "floored_rwa": floored_rwa,
+        "floor_binding": floor_binding,
+        "floor_add_on": floor_add_on,
+        "floor_add_on_pct": (floor_add_on / irb_rwa * 100) if irb_rwa > 0 else 0,
+        "irb_capital": irb_capital,
+        "floored_capital": floored_capital,
+        "capital_add_on": capital_add_on,
+    }
+
+
+def apply_output_floor_portfolio(
+    irb_results: list[dict],
+    sa_results: list[dict],
+    floor_percentage: float = 0.725
+) -> dict:
+    """
+    Apply output floor at portfolio level.
+
+    Parameters:
+    -----------
+    irb_results : list of dict
+        List of IRB calculation results (each must have 'rwa' key)
+    sa_results : list of dict
+        List of SA calculation results (each must have 'rwa' key)
+    floor_percentage : float
+        Output floor percentage
+
+    Returns:
+    --------
+    dict
+        Portfolio-level floor results
+    """
+    total_irb_rwa = sum(r.get("rwa", 0) for r in irb_results)
+    total_sa_rwa = sum(r.get("rwa", 0) for r in sa_results)
+
+    return apply_output_floor(total_irb_rwa, total_sa_rwa, floor_percentage)
+
+
+# =============================================================================
+# Input Validation
+# =============================================================================
+
+def validate_irb_inputs(
+    pd: float,
+    lgd: float,
+    maturity: float,
+    ead: float,
+    asset_class: str
+) -> dict:
+    """
+    Validate IRB inputs against regulatory requirements.
+
+    Parameters:
+    -----------
+    pd : float
+        Probability of Default
+    lgd : float
+        Loss Given Default
+    maturity : float
+        Effective maturity in years
+    ead : float
+        Exposure at Default
+    asset_class : str
+        Asset class
+
+    Returns:
+    --------
+    dict
+        Validation result with errors, warnings, and adjusted values
+    """
+    errors = []
+    warnings = []
+    adjustments = {}
+
+    # PD validation
+    if pd < 0:
+        errors.append("PD must be non-negative")
+    elif pd > 1:
+        errors.append("PD must be <= 1 (100%)")
+
+    pd_floor = PD_FLOORS.get(asset_class, 0.0003)
+    if 0 < pd < pd_floor:
+        warnings.append(f"PD {pd:.4%} below regulatory floor {pd_floor:.4%} for {asset_class}")
+        adjustments["pd"] = pd_floor
+
+    # LGD validation
+    if lgd < 0:
+        errors.append("LGD must be non-negative")
+    elif lgd > 1:
+        errors.append("LGD must be <= 1 (100%)")
+
+    # Check LGD floor (for A-IRB)
+    lgd_floor = LGD_FLOORS.get("senior_unsecured", 0.25)
+    if 0 < lgd < lgd_floor:
+        warnings.append(f"LGD {lgd:.1%} may be below regulatory floor {lgd_floor:.1%}")
+
+    # Maturity validation
+    if maturity < 0:
+        errors.append("Maturity must be non-negative")
+    elif maturity > 30:
+        warnings.append(f"Maturity {maturity}y unusually high")
+
+    if not asset_class.startswith("retail"):
+        if maturity < 1:
+            warnings.append("Maturity below 1y floor for non-retail")
+            adjustments["maturity"] = 1.0
+        elif maturity > 5:
+            warnings.append("Maturity above 5y cap")
+            adjustments["maturity"] = 5.0
+
+    # EAD validation
+    if ead < 0:
+        errors.append("EAD must be non-negative")
+
+    # Asset class validation
+    if asset_class not in VALID_ASSET_CLASSES:
+        warnings.append(f"Unknown asset class: {asset_class}")
+
+    return {
+        "valid": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+        "adjustments": adjustments,
+        "input_pd": pd,
+        "input_lgd": lgd,
+        "input_maturity": maturity,
+        "input_ead": ead,
+        "asset_class": asset_class,
+    }
+
+
+def classify_exposure(
+    counterparty_type: str,
+    is_regulated: bool = False,
+    is_sme: bool = False,
+    exposure_amount: float = None,
+    annual_sales: float = None,
+    is_individual: bool = False
+) -> str:
+    """
+    Determine regulatory exposure class based on counterparty characteristics.
+
+    Parameters:
+    -----------
+    counterparty_type : str
+        "sovereign", "bank", "corporate", "retail"
+    is_regulated : bool
+        True if counterparty is a regulated financial institution
+    is_sme : bool
+        True if counterparty is an SME
+    exposure_amount : float
+        Total exposure amount (for retail granularity test)
+    annual_sales : float
+        Annual sales/turnover in EUR
+    is_individual : bool
+        True if counterparty is a natural person
+
+    Returns:
+    --------
+    str
+        Regulatory exposure class
+    """
+    if counterparty_type == "sovereign":
+        return "sovereign"
+
+    elif counterparty_type == "pse":
+        return "pse"
+
+    elif counterparty_type == "mdb":
+        return "mdb"
+
+    elif counterparty_type == "bank":
+        if is_regulated:
+            return "bank"
+        else:
+            return "corporate"  # Unregulated financials treated as corporate
+
+    elif counterparty_type == "corporate":
+        # Check for retail treatment eligibility
+        if is_individual or (exposure_amount and exposure_amount <= 1_000_000):
+            # Could qualify as retail if other criteria met
+            pass
+
+        if is_sme and annual_sales and annual_sales < 50_000_000:
+            return "sme_corporate"
+
+        return "corporate"
+
+    elif counterparty_type == "retail":
+        # Check granularity (no single exposure > EUR 1m)
+        if exposure_amount and exposure_amount > 1_000_000:
+            return "corporate"  # Fails retail granularity
+
+        return "retail_other"  # Default retail class
+
+    else:
+        return "corporate"  # Default
 
 
 def calculate_capital_requirement(
     pd: float,
     lgd: float,
     maturity: float = 2.5,
-    asset_class: str = "corporate"
+    asset_class: str = "corporate",
+    maturity_config: MaturityConfig = None,
+    sales_turnover: float = None
 ) -> float:
     """
     Calculate the capital requirement K using the IRB formula.
@@ -1809,18 +3238,23 @@ def calculate_capital_requirement(
         Effective maturity in years (default 2.5)
     asset_class : str
         Asset class for correlation calculation
+    maturity_config : MaturityConfig
+        Optional maturity configuration for flexible handling
+    sales_turnover : float, optional
+        Annual sales in EUR millions (for SME firm-size adjustment)
 
     Returns:
     --------
     float
         Capital requirement K as a decimal
     """
-    # Floor and cap PD per Basel requirements
-    pd = max(pd, 0.0003)  # 3 basis points floor
+    # Apply PD floor based on asset class
+    pd_floor = PD_FLOORS.get(asset_class, 0.0003)
+    pd = max(pd, pd_floor)
     pd = min(pd, 1.0)
 
-    # Get correlation
-    r = calculate_correlation(pd, asset_class)
+    # Get correlation (with SME adjustment if applicable)
+    r = calculate_correlation(pd, asset_class, sales_turnover)
 
     # Calculate the conditional PD at 99.9% confidence
     # G(x) = inverse normal CDF
@@ -1837,13 +3271,29 @@ def calculate_capital_requirement(
     # Unexpected loss (capital for UL)
     unexpected_loss = lgd * conditional_pd - expected_loss
 
-    # Maturity adjustment (only for non-retail)
+    # Determine if maturity adjustment applies
+    apply_adjustment = True
     if asset_class.startswith("retail"):
-        k = unexpected_loss
-    else:
-        b = calculate_maturity_adjustment(pd)
-        maturity_factor = (1 + (maturity - 2.5) * b) / (1 - 1.5 * b)
+        apply_adjustment = False
+    if maturity_config and not maturity_config.apply_maturity_adjustment:
+        apply_adjustment = False
+
+    if apply_adjustment:
+        # Get effective maturity with floor/cap
+        m = get_effective_maturity(maturity, maturity_config)
+
+        # Get maturity adjustment factor
+        b = calculate_maturity_adjustment(pd, maturity_config)
+
+        # Reference maturity (default 2.5)
+        m_ref = 2.5
+        if maturity_config and maturity_config.reference_maturity:
+            m_ref = maturity_config.reference_maturity
+
+        maturity_factor = (1 + (m - m_ref) * b) / (1 - 1.5 * b)
         k = unexpected_loss * maturity_factor
+    else:
+        k = unexpected_loss
 
     return max(k, 0)
 
@@ -1853,7 +3303,9 @@ def calculate_rwa(
     pd: float,
     lgd: float = 0.45,
     maturity: float = 2.5,
-    asset_class: str = "corporate"
+    asset_class: str = "corporate",
+    maturity_config: MaturityConfig = None,
+    sales_turnover: float = None
 ) -> dict:
     """
     Calculate Risk-Weighted Assets using IRB Foundation approach.
@@ -1870,14 +3322,20 @@ def calculate_rwa(
         Effective maturity in years (default 2.5)
     asset_class : str
         Asset class: "corporate", "retail_mortgage", "retail_revolving", "retail_other"
+    maturity_config : MaturityConfig, optional
+        Configuration for maturity handling (floors, caps, scaling, overrides)
+    sales_turnover : float, optional
+        Annual sales in EUR millions (for SME firm-size adjustment, CRE31.8)
 
     Returns:
     --------
     dict
         Dictionary with RWA, capital requirement, risk weight, and intermediate values
     """
-    # Calculate capital requirement
-    k = calculate_capital_requirement(pd, lgd, maturity, asset_class)
+    # Calculate capital requirement (with SME adjustment if applicable)
+    k = calculate_capital_requirement(
+        pd, lgd, maturity, asset_class, maturity_config, sales_turnover
+    )
 
     # RWA = K × 12.5 × EAD
     rwa = k * 12.5 * ead
@@ -1885,10 +3343,10 @@ def calculate_rwa(
     # Risk weight as percentage
     risk_weight = k * 12.5 * 100  # as percentage
 
-    # Correlation used
-    correlation = calculate_correlation(pd, asset_class)
+    # Correlation used (with SME adjustment if applicable)
+    correlation = calculate_correlation(pd, asset_class, sales_turnover)
 
-    return {
+    result = {
         "ead": ead,
         "pd": pd,
         "lgd": lgd,
@@ -1901,8 +3359,18 @@ def calculate_rwa(
         "expected_loss": pd * lgd * ead,
     }
 
+    if maturity_config:
+        result["maturity_config_used"] = maturity_config.__class__.__name__
+        result["effective_maturity"] = get_effective_maturity(maturity, maturity_config)
 
-def calculate_batch_rwa(exposures: list[dict]) -> dict:
+    if sales_turnover is not None:
+        result["sales_turnover_eur_m"] = sales_turnover
+        result["sme_correlation_adjustment"] = calculate_sme_correlation_adjustment(sales_turnover)
+
+    return result
+
+
+def calculate_batch_rwa(exposures: list[dict], maturity_config: MaturityConfig = None) -> dict:
     """
     Calculate RWA for a batch of exposures.
 
@@ -1910,6 +3378,8 @@ def calculate_batch_rwa(exposures: list[dict]) -> dict:
     -----------
     exposures : list of dict
         Each dict should have: ead, pd, and optionally lgd, maturity, asset_class
+    maturity_config : MaturityConfig, optional
+        Configuration for maturity handling (applies to all exposures)
 
     Returns:
     --------
@@ -1922,12 +3392,15 @@ def calculate_batch_rwa(exposures: list[dict]) -> dict:
     total_el = 0
 
     for exp in exposures:
+        # Allow per-exposure maturity_config override
+        exp_config = exp.get("maturity_config", maturity_config)
         result = calculate_rwa(
             ead=exp["ead"],
             pd=exp["pd"],
             lgd=exp.get("lgd", 0.45),
             maturity=exp.get("maturity", 2.5),
-            asset_class=exp.get("asset_class", "corporate")
+            asset_class=exp.get("asset_class", "corporate"),
+            maturity_config=exp_config
         )
         results.append(result)
         total_ead += result["ead"]
@@ -1975,7 +3448,12 @@ def calculate_airb_rwa(
     lgd: float,
     maturity: float = 2.5,
     asset_class: str = "corporate",
-    lgd_downturn: float = None
+    lgd_downturn: float = None,
+    maturity_config: MaturityConfig = None,
+    sales_turnover: float = None,
+    collateral_type: str = "senior_unsecured",
+    apply_lgd_floor_check: bool = True,
+    estimate_downturn: bool = False
 ) -> dict:
     """
     Calculate RWA using A-IRB (Advanced IRB) approach.
@@ -1990,24 +3468,50 @@ def calculate_airb_rwa(
     pd : float
         Bank-estimated Probability of Default
     lgd : float
-        Bank-estimated Loss Given Default (downturn LGD should be used)
+        Bank-estimated Loss Given Default (through-the-cycle or downturn)
     maturity : float
         Effective maturity in years
     asset_class : str
         Asset class for correlation calculation
     lgd_downturn : float, optional
         Explicit downturn LGD (if different from lgd parameter)
+    maturity_config : MaturityConfig, optional
+        Configuration for maturity handling (floors, caps, scaling, overrides)
+    sales_turnover : float, optional
+        Annual sales in EUR millions (for SME firm-size adjustment, CRE31.8)
+    collateral_type : str
+        Type of collateral for LGD floor determination
+    apply_lgd_floor_check : bool
+        Whether to check and apply regulatory LGD floor (default True)
+    estimate_downturn : bool
+        Whether to estimate downturn LGD from TTC LGD (default False)
 
     Returns:
     --------
     dict
         Dictionary with RWA and intermediate values
     """
-    # Use downturn LGD if provided, otherwise assume lgd is already downturn
-    lgd_used = lgd_downturn if lgd_downturn is not None else lgd
+    # Determine LGD to use
+    if lgd_downturn is not None:
+        lgd_used = lgd_downturn
+    elif estimate_downturn:
+        lgd_used = estimate_downturn_lgd(lgd, asset_class, collateral_type)
+    else:
+        lgd_used = lgd
 
-    # Calculate capital requirement (same formula as F-IRB)
-    k = calculate_capital_requirement(pd, lgd_used, maturity, asset_class)
+    # Apply LGD floor if required (Basel IV)
+    lgd_floor_applied = False
+    lgd_floor_value = None
+    if apply_lgd_floor_check:
+        lgd_floor_value = LGD_FLOORS.get(collateral_type, 0.25)
+        if lgd_used < lgd_floor_value:
+            lgd_floor_applied = True
+            lgd_used = apply_lgd_floor(lgd_used, collateral_type, asset_class)
+
+    # Calculate capital requirement (with SME adjustment if applicable)
+    k = calculate_capital_requirement(
+        pd, lgd_used, maturity, asset_class, maturity_config, sales_turnover
+    )
 
     # RWA = K × 12.5 × EAD
     rwa = k * 12.5 * ead
@@ -2015,17 +3519,20 @@ def calculate_airb_rwa(
     # Risk weight as percentage
     risk_weight = k * 12.5 * 100
 
-    # Correlation used
-    correlation = calculate_correlation(pd, asset_class)
+    # Correlation used (with SME adjustment if applicable)
+    correlation = calculate_correlation(pd, asset_class, sales_turnover)
 
-    return {
+    result = {
         "approach": "A-IRB",
         "ead": ead,
         "pd": pd,
-        "lgd": lgd,
+        "lgd_input": lgd,
         "lgd_downturn": lgd_used,
+        "lgd_floor_applied": lgd_floor_applied,
+        "lgd_floor_value": lgd_floor_value,
         "maturity": maturity,
         "asset_class": asset_class,
+        "collateral_type": collateral_type,
         "correlation": correlation,
         "capital_requirement_k": k,
         "risk_weight_pct": risk_weight,
@@ -2033,8 +3540,18 @@ def calculate_airb_rwa(
         "expected_loss": pd * lgd_used * ead,
     }
 
+    if maturity_config:
+        result["maturity_config_used"] = maturity_config.__class__.__name__
+        result["effective_maturity"] = get_effective_maturity(maturity, maturity_config)
 
-def calculate_batch_airb_rwa(exposures: list[dict]) -> dict:
+    if sales_turnover is not None:
+        result["sales_turnover_eur_m"] = sales_turnover
+        result["sme_correlation_adjustment"] = calculate_sme_correlation_adjustment(sales_turnover)
+
+    return result
+
+
+def calculate_batch_airb_rwa(exposures: list[dict], maturity_config: MaturityConfig = None) -> dict:
     """
     Calculate A-IRB RWA for a batch of exposures.
 
@@ -2042,6 +3559,8 @@ def calculate_batch_airb_rwa(exposures: list[dict]) -> dict:
     -----------
     exposures : list of dict
         Each dict should have: ead, pd, lgd, and optionally maturity, asset_class, lgd_downturn
+    maturity_config : MaturityConfig, optional
+        Configuration for maturity handling (applies to all exposures)
 
     Returns:
     --------
@@ -2054,13 +3573,16 @@ def calculate_batch_airb_rwa(exposures: list[dict]) -> dict:
     total_el = 0
 
     for exp in exposures:
+        # Allow per-exposure maturity_config override
+        exp_config = exp.get("maturity_config", maturity_config)
         result = calculate_airb_rwa(
             ead=exp["ead"],
             pd=exp["pd"],
             lgd=exp["lgd"],
             maturity=exp.get("maturity", 2.5),
             asset_class=exp.get("asset_class", "corporate"),
-            lgd_downturn=exp.get("lgd_downturn")
+            lgd_downturn=exp.get("lgd_downturn"),
+            maturity_config=exp_config
         )
         results.append(result)
         total_ead += result["ead"]
@@ -2082,7 +3604,8 @@ def compare_firb_vs_airb(
     airb_lgd: float,
     firb_lgd: float = 0.45,
     maturity: float = 2.5,
-    asset_class: str = "corporate"
+    asset_class: str = "corporate",
+    maturity_config: MaturityConfig = None
 ) -> dict:
     """
     Compare F-IRB vs A-IRB for the same exposure.
@@ -2101,6 +3624,8 @@ def compare_firb_vs_airb(
         Effective maturity
     asset_class : str
         Asset class
+    maturity_config : MaturityConfig, optional
+        Configuration for maturity handling (floors, caps, scaling, overrides)
 
     Returns:
     --------
@@ -2108,11 +3633,11 @@ def compare_firb_vs_airb(
         Comparison results
     """
     # F-IRB calculation
-    firb_result = calculate_rwa(ead, pd, firb_lgd, maturity, asset_class)
+    firb_result = calculate_rwa(ead, pd, firb_lgd, maturity, asset_class, maturity_config)
     firb_result["approach"] = "F-IRB"
 
     # A-IRB calculation
-    airb_result = calculate_airb_rwa(ead, pd, airb_lgd, maturity, asset_class)
+    airb_result = calculate_airb_rwa(ead, pd, airb_lgd, maturity, asset_class, maturity_config=maturity_config)
 
     # Calculate differences
     rwa_diff = airb_result["rwa"] - firb_result["rwa"]

@@ -11,6 +11,74 @@ Basel III made refinements to correlations and added the output floor.
 
 import math
 from scipy.stats import norm
+from dataclasses import dataclass
+from typing import Optional
+
+
+# =============================================================================
+# Maturity Configuration
+# =============================================================================
+
+@dataclass
+class MaturityConfig:
+    """
+    Flexible maturity configuration for IRB calculations.
+
+    Allows overriding default maturity handling for different exposure types
+    and regulatory treatments.
+
+    Attributes:
+    -----------
+    effective_maturity : float
+        The M value to use (if None, uses the maturity parameter directly)
+    maturity_floor : float
+        Minimum maturity in years (default: 1.0, but 0 for some repo-style)
+    maturity_cap : float
+        Maximum maturity in years (default: 5.0)
+    apply_maturity_adjustment : bool
+        Whether to apply the b(PD) maturity adjustment (False for retail)
+    maturity_adjustment_override : float
+        Direct override of the b factor (if None, calculated from PD)
+    maturity_scaling_factor : float
+        Multiplier on the maturity adjustment (default: 1.0)
+    reference_maturity : float
+        Reference maturity for adjustment formula (default: 2.5 years)
+    """
+    effective_maturity: Optional[float] = None
+    maturity_floor: float = 1.0
+    maturity_cap: float = 5.0
+    apply_maturity_adjustment: bool = True
+    maturity_adjustment_override: Optional[float] = None
+    maturity_scaling_factor: float = 1.0
+    reference_maturity: float = 2.5
+
+
+# Pre-defined maturity configurations for common exposure types
+MATURITY_CONFIGS = {
+    # Standard corporate - uses default 1y floor, 5y cap
+    "corporate": MaturityConfig(),
+
+    # F-IRB fixed maturity at 2.5 years
+    "firb_fixed": MaturityConfig(effective_maturity=2.5),
+
+    # Repo-style transactions - can have 0 floor
+    "repo_style": MaturityConfig(maturity_floor=0.0),
+
+    # Short-term self-liquidating trade finance
+    "trade_finance": MaturityConfig(maturity_floor=0.0, maturity_cap=1.0),
+
+    # Retail - no maturity adjustment
+    "retail": MaturityConfig(apply_maturity_adjustment=False),
+
+    # SME with reduced maturity sensitivity
+    "sme": MaturityConfig(maturity_scaling_factor=0.75),
+
+    # Project finance - often longer maturities
+    "project_finance": MaturityConfig(maturity_cap=7.0),
+
+    # Revolving facilities
+    "revolving": MaturityConfig(effective_maturity=2.5),
+}
 
 
 # =============================================================================
@@ -145,15 +213,72 @@ def calculate_correlation(pd: float, asset_class: str = "corporate") -> float:
         return 0.12 * exp_factor + 0.24 * (1 - exp_factor)
 
 
-def calculate_maturity_adjustment(pd: float) -> float:
+def calculate_maturity_adjustment(
+    pd: float,
+    config: MaturityConfig = None
+) -> float:
     """
     Calculate maturity adjustment factor b(PD).
 
     b = (0.11852 - 0.05478 * ln(PD))^2  (Para 272)
+
+    Parameters:
+    -----------
+    pd : float
+        Probability of Default
+    config : MaturityConfig
+        Optional configuration for overrides
+
+    Returns:
+    --------
+    float
+        Maturity adjustment factor b
     """
+    # Check for direct override
+    if config and config.maturity_adjustment_override is not None:
+        return config.maturity_adjustment_override
+
     pd = max(pd, 0.0003)  # Floor to avoid log issues
     b = (0.11852 - 0.05478 * math.log(pd)) ** 2
+
+    # Apply scaling factor if configured
+    if config and config.maturity_scaling_factor != 1.0:
+        b = b * config.maturity_scaling_factor
+
     return b
+
+
+def get_effective_maturity(
+    maturity: float,
+    config: MaturityConfig = None
+) -> float:
+    """
+    Get effective maturity after applying floor and cap.
+
+    Parameters:
+    -----------
+    maturity : float
+        Input maturity in years
+    config : MaturityConfig
+        Configuration with floor/cap settings
+
+    Returns:
+    --------
+    float
+        Effective maturity
+    """
+    if config is None:
+        config = MaturityConfig()
+
+    # Use override if specified
+    if config.effective_maturity is not None:
+        return config.effective_maturity
+
+    # Apply floor and cap
+    m = max(maturity, config.maturity_floor)
+    m = min(m, config.maturity_cap)
+
+    return m
 
 
 # =============================================================================
@@ -164,7 +289,8 @@ def calculate_capital_requirement(
     pd: float,
     lgd: float,
     maturity: float = 2.5,
-    asset_class: str = "corporate"
+    asset_class: str = "corporate",
+    maturity_config: MaturityConfig = None
 ) -> float:
     """
     Calculate capital requirement K using the Basel II IRB formula.
@@ -182,6 +308,8 @@ def calculate_capital_requirement(
         Effective maturity (years)
     asset_class : str
         Asset class for correlation
+    maturity_config : MaturityConfig
+        Optional maturity configuration for flexible handling
 
     Returns:
     --------
@@ -206,13 +334,29 @@ def calculate_capital_requirement(
     # Capital for unexpected loss
     k_base = lgd * conditional_pd - pd * lgd
 
-    # Maturity adjustment (not for retail)
+    # Determine if maturity adjustment applies
+    apply_adjustment = True
     if asset_class.startswith("retail"):
-        k = k_base
-    else:
-        b = calculate_maturity_adjustment(pd)
-        maturity_factor = (1 + (maturity - 2.5) * b) / (1 - 1.5 * b)
+        apply_adjustment = False
+    if maturity_config and not maturity_config.apply_maturity_adjustment:
+        apply_adjustment = False
+
+    if apply_adjustment:
+        # Get effective maturity with floor/cap
+        m = get_effective_maturity(maturity, maturity_config)
+
+        # Get maturity adjustment factor
+        b = calculate_maturity_adjustment(pd, maturity_config)
+
+        # Reference maturity (default 2.5)
+        m_ref = 2.5
+        if maturity_config and maturity_config.reference_maturity:
+            m_ref = maturity_config.reference_maturity
+
+        maturity_factor = (1 + (m - m_ref) * b) / (1 - 1.5 * b)
         k = k_base * maturity_factor
+    else:
+        k = k_base
 
     return max(k, 0)
 
@@ -226,7 +370,8 @@ def calculate_irb_rwa(
     pd: float,
     lgd: float,
     maturity: float = 2.5,
-    asset_class: str = "corporate"
+    asset_class: str = "corporate",
+    maturity_config: MaturityConfig = None
 ) -> dict:
     """
     Calculate RWA using IRB approach (generic).
@@ -245,23 +390,29 @@ def calculate_irb_rwa(
         Effective maturity
     asset_class : str
         Asset class
+    maturity_config : MaturityConfig
+        Optional maturity configuration for flexible handling
 
     Returns:
     --------
     dict
         IRB calculation results
     """
-    k = calculate_capital_requirement(pd, lgd, maturity, asset_class)
+    # Get effective maturity
+    effective_m = get_effective_maturity(maturity, maturity_config)
+
+    k = calculate_capital_requirement(pd, lgd, effective_m, asset_class, maturity_config)
     rwa = k * 12.5 * ead
     risk_weight = k * 12.5 * 100
     correlation = calculate_correlation(pd, asset_class)
 
-    return {
+    result = {
         "approach": "Basel II IRB",
         "ead": ead,
         "pd": pd,
         "lgd": lgd,
         "maturity": maturity,
+        "effective_maturity": effective_m,
         "asset_class": asset_class,
         "correlation": correlation,
         "capital_requirement_k": k,
@@ -270,13 +421,26 @@ def calculate_irb_rwa(
         "expected_loss": pd * lgd * ead,
     }
 
+    # Add maturity config details if provided
+    if maturity_config:
+        result["maturity_config"] = {
+            "floor": maturity_config.maturity_floor,
+            "cap": maturity_config.maturity_cap,
+            "scaling_factor": maturity_config.maturity_scaling_factor,
+            "adjustment_applied": maturity_config.apply_maturity_adjustment,
+        }
+
+    return result
+
 
 def calculate_firb_rwa(
     ead: float,
     pd: float,
     seniority: str = "senior",
     collateral_type: str = None,
-    asset_class: str = "corporate"
+    asset_class: str = "corporate",
+    maturity_config: MaturityConfig = None,
+    override_fixed_maturity: bool = False
 ) -> dict:
     """
     Calculate RWA using Foundation IRB (F-IRB).
@@ -295,6 +459,10 @@ def calculate_firb_rwa(
         Type of collateral if secured
     asset_class : str
         Asset class
+    maturity_config : MaturityConfig
+        Optional maturity configuration (normally F-IRB uses fixed 2.5y)
+    override_fixed_maturity : bool
+        If True, allows maturity_config to override the fixed 2.5y maturity
 
     Returns:
     --------
@@ -307,13 +475,21 @@ def calculate_firb_rwa(
     else:
         lgd = FIRB_LGD.get(f"{seniority}_unsecured", 0.45)
 
-    # Fixed maturity for F-IRB
-    maturity = FIRB_MATURITY
+    # F-IRB normally uses fixed maturity
+    if override_fixed_maturity and maturity_config:
+        # Use provided config
+        config = maturity_config
+        maturity = maturity_config.effective_maturity or FIRB_MATURITY
+    else:
+        # Standard F-IRB: fixed 2.5 year maturity
+        maturity = FIRB_MATURITY
+        config = MATURITY_CONFIGS["firb_fixed"]
 
-    result = calculate_irb_rwa(ead, pd, lgd, maturity, asset_class)
+    result = calculate_irb_rwa(ead, pd, lgd, maturity, asset_class, config)
     result["approach"] = "Basel II F-IRB"
     result["seniority"] = seniority
     result["collateral_type"] = collateral_type
+    result["fixed_maturity_used"] = not override_fixed_maturity
 
     return result
 
@@ -324,7 +500,8 @@ def calculate_airb_rwa(
     lgd: float,
     maturity: float = 2.5,
     asset_class: str = "corporate",
-    lgd_downturn: float = None
+    lgd_downturn: float = None,
+    maturity_config: MaturityConfig = None
 ) -> dict:
     """
     Calculate RWA using Advanced IRB (A-IRB).
@@ -345,6 +522,10 @@ def calculate_airb_rwa(
         Asset class
     lgd_downturn : float
         Explicit downturn LGD if different from lgd
+    maturity_config : MaturityConfig
+        Optional maturity configuration for flexible handling.
+        Common presets available: MATURITY_CONFIGS["corporate"],
+        MATURITY_CONFIGS["repo_style"], MATURITY_CONFIGS["sme"], etc.
 
     Returns:
     --------
@@ -354,7 +535,7 @@ def calculate_airb_rwa(
     # Use downturn LGD if provided
     lgd_used = lgd_downturn if lgd_downturn is not None else lgd
 
-    result = calculate_irb_rwa(ead, pd, lgd_used, maturity, asset_class)
+    result = calculate_irb_rwa(ead, pd, lgd_used, maturity, asset_class, maturity_config)
     result["approach"] = "Basel II A-IRB"
     result["lgd_input"] = lgd
     result["lgd_downturn"] = lgd_used

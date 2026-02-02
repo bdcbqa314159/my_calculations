@@ -65,6 +65,11 @@ from .credit_risk_irb import (
     calculate_slotting_rwa,
     RATING_TO_PD,
     get_rating_from_pd,
+    # Maturity configuration
+    MaturityConfig,
+    MATURITY_CONFIGS,
+    get_effective_maturity,
+    calculate_maturity_adjustment,
 )
 
 # Counterparty Credit Risk
@@ -190,6 +195,11 @@ __all__ = [
     "calculate_slotting_rwa",
     "RATING_TO_PD",
     "get_rating_from_pd",
+    # Maturity configuration
+    "MaturityConfig",
+    "MATURITY_CONFIGS",
+    "get_effective_maturity",
+    "calculate_maturity_adjustment",
     # Counterparty Credit Risk
     "calculate_cem_ead_single",
     "calculate_cem_ead_with_netting",

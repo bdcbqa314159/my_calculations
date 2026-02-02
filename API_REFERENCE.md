@@ -81,6 +81,7 @@ Comprehensive input/output documentation for all Basel II, Basel III/IV calculat
 | `maturity` | float | Effective maturity in years (default: 2.5) |
 | `asset_class` | str | "corporate", "retail_mortgage", "retail_revolving", "retail_other" |
 | *A-IRB only:* `lgd_downturn` | float | Downturn LGD if different |
+| `maturity_config` | MaturityConfig | Flexible maturity handling (see below) |
 
 | Output | Type | Description |
 |--------|------|-------------|
@@ -94,6 +95,54 @@ Comprehensive input/output documentation for all Basel II, Basel III/IV calculat
 | `risk_weight_pct` | float | Risk weight (%) |
 | `rwa` | float | Risk-weighted assets |
 | `expected_loss` | float | PD * LGD * EAD |
+| `maturity_config_used` | str | Config class name (if config provided) |
+| `effective_maturity` | float | Maturity after floor/cap (if config provided) |
+
+---
+
+### `MaturityConfig` (dataclass)
+**Flexible maturity handling for IRB calculations**
+
+All IRB functions (`calculate_rwa`, `calculate_airb_rwa`, `calculate_batch_rwa`, `calculate_batch_airb_rwa`, `compare_firb_vs_airb`) accept an optional `maturity_config` parameter.
+
+```python
+from rwa_calc import MaturityConfig, MATURITY_CONFIGS
+
+# Using pre-defined configurations
+result = calculate_rwa(ead=1_000_000, pd=0.01, maturity_config=MATURITY_CONFIGS["repo_style"])
+
+# Custom configuration
+custom_config = MaturityConfig(
+    effective_maturity=2.5,  # Fixed maturity value
+    maturity_floor=0.5,      # Custom floor (default: 1.0)
+    maturity_cap=3.0,        # Custom cap (default: 5.0)
+    maturity_adjustment_override=1.05  # Direct b-factor override
+)
+result = calculate_airb_rwa(ead=1_000_000, pd=0.01, lgd=0.35, maturity_config=custom_config)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `effective_maturity` | float/None | None | Fixed maturity override (bypasses floor/cap) |
+| `maturity_floor` | float | 1.0 | Minimum maturity (years) |
+| `maturity_cap` | float | 5.0 | Maximum maturity (years) |
+| `apply_maturity_adjustment` | bool | True | Whether to apply maturity adjustment to K |
+| `maturity_adjustment_override` | float/None | None | Direct override for maturity adjustment factor b |
+| `maturity_scaling_factor` | float | 1.0 | Scaling factor for maturity adjustment |
+| `reference_maturity` | float | 2.5 | Reference maturity for adjustment calculation |
+
+**Pre-defined Configurations (`MATURITY_CONFIGS`):**
+
+| Key | Floor | Cap | Notes |
+|-----|-------|-----|-------|
+| `"corporate"` | 1.0 | 5.0 | Standard corporate (default) |
+| `"firb_fixed"` | 1.0 | 5.0 | Fixed 2.5y effective maturity |
+| `"repo_style"` | 0.0 | 5.0 | Repo/securities lending (no floor) |
+| `"trade_finance"` | 0.0 | 1.0 | Short-term trade finance |
+| `"retail"` | - | - | No maturity adjustment |
+| `"sme"` | 1.0 | 5.0 | SME with 0.75 scaling factor |
+| `"project_finance"` | 1.0 | 7.0 | Extended cap for project finance |
+| `"revolving"` | 1.0 | 5.0 | Fixed 2.5y for revolving facilities |
 
 ---
 
@@ -1519,6 +1568,57 @@ Bank estimates all parameters (PD, LGD, EAD, M).
 | `rwa_difference` | float | A-IRB RWA - F-IRB RWA |
 | `rwa_difference_pct` | float | Percentage difference |
 | `more_conservative` | str | "F-IRB" or "A-IRB" |
+
+---
+
+### `MaturityConfig` (dataclass)
+**Flexible maturity handling for IRB calculations**
+
+All IRB functions accept an optional `maturity_config` parameter for customizing maturity treatment.
+
+```python
+from basel2 import MaturityConfig, MATURITY_CONFIGS
+
+# Using pre-defined configurations
+result = calculate_firb_rwa(ead=1_000_000, pd=0.01, maturity_config=MATURITY_CONFIGS["repo_style"])
+
+# Custom configuration
+custom_config = MaturityConfig(
+    effective_maturity=2.5,  # Fixed maturity value
+    maturity_floor=0.5,      # Custom floor (default: 1.0)
+    maturity_cap=3.0,        # Custom cap (default: 5.0)
+    maturity_adjustment_override=1.05  # Direct b-factor override
+)
+result = calculate_airb_rwa(ead=1_000_000, pd=0.01, lgd=0.35, maturity_config=custom_config)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `effective_maturity` | float/None | None | Fixed maturity override (bypasses floor/cap) |
+| `maturity_floor` | float | 1.0 | Minimum maturity (years) |
+| `maturity_cap` | float | 5.0 | Maximum maturity (years) |
+| `apply_maturity_adjustment` | bool | True | Whether to apply maturity adjustment to K |
+| `maturity_adjustment_override` | float/None | None | Direct override for maturity adjustment factor b |
+| `maturity_scaling_factor` | float | 1.0 | Scaling factor for maturity adjustment |
+| `reference_maturity` | float | 2.5 | Reference maturity for adjustment calculation |
+
+**Pre-defined Configurations (`MATURITY_CONFIGS`):**
+
+| Key | Floor | Cap | Notes |
+|-----|-------|-----|-------|
+| `"corporate"` | 1.0 | 5.0 | Standard corporate (default) |
+| `"firb_fixed"` | 1.0 | 5.0 | Fixed 2.5y effective maturity |
+| `"repo_style"` | 0.0 | 5.0 | Repo/securities lending (no floor) |
+| `"trade_finance"` | 0.0 | 1.0 | Short-term trade finance |
+| `"retail"` | - | - | No maturity adjustment |
+| `"sme"` | 1.0 | 5.0 | SME with 0.75 scaling factor |
+| `"project_finance"` | 1.0 | 7.0 | Extended cap for project finance |
+| `"revolving"` | 1.0 | 5.0 | Fixed 2.5y for revolving facilities |
+
+**Helper Functions:**
+
+- `get_effective_maturity(maturity, config)` - Apply floor/cap from config
+- `calculate_maturity_adjustment(pd, config)` - Calculate b-factor with config
 
 ---
 
