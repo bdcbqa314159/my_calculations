@@ -689,6 +689,213 @@ def calculate_basel25_market_risk_capital(
     }
 
 
+# =============================================================================
+# PD-Based Wrappers
+# =============================================================================
+
+# Import rating mapping from IRB module
+from .credit_risk_irb import get_rating_from_pd, RATING_TO_PD
+
+
+def create_irc_position_from_pd(
+    position_id: str,
+    issuer: str,
+    notional: float,
+    market_value: float,
+    pd: float,
+    seniority: str = "senior_unsecured",
+    liquidity_horizon: int = 3,
+    is_long: bool = True
+) -> IRCPosition:
+    """
+    Create an IRCPosition using PD instead of rating.
+
+    Parameters:
+    -----------
+    position_id : str
+        Position identifier
+    issuer : str
+        Issuer name
+    notional : float
+        Position notional
+    market_value : float
+        Current market value
+    pd : float
+        Probability of Default
+    seniority : str
+        Seniority level
+    liquidity_horizon : int
+        Liquidity horizon in months
+    is_long : bool
+        Long or short position
+
+    Returns:
+    --------
+    IRCPosition
+        Position with derived rating
+    """
+    # Derive rating from PD
+    derived_rating = get_rating_from_pd(pd)
+
+    # Simplify rating for IRC (only uses major categories)
+    if derived_rating in ["AAA", "AA+", "AA", "AA-"]:
+        irc_rating = "AA"
+    elif derived_rating in ["A+", "A", "A-"]:
+        irc_rating = "A"
+    elif derived_rating in ["BBB+", "BBB", "BBB-"]:
+        irc_rating = "BBB"
+    elif derived_rating in ["BB+", "BB", "BB-"]:
+        irc_rating = "BB"
+    elif derived_rating in ["B+", "B", "B-"]:
+        irc_rating = "B"
+    else:
+        irc_rating = "CCC"
+
+    return IRCPosition(
+        position_id=position_id,
+        issuer=issuer,
+        notional=notional,
+        market_value=market_value,
+        rating=irc_rating,
+        seniority=seniority,
+        liquidity_horizon=liquidity_horizon,
+        is_long=is_long
+    )
+
+
+def calculate_irc_position_from_pd(
+    position_id: str,
+    issuer: str,
+    notional: float,
+    market_value: float,
+    pd: float,
+    seniority: str = "senior_unsecured",
+    liquidity_horizon: int = 3,
+    is_long: bool = True
+) -> dict:
+    """
+    Calculate IRC for a single position using PD.
+
+    Parameters:
+    -----------
+    position_id : str
+        Position identifier
+    issuer : str
+        Issuer name
+    notional : float
+        Position notional
+    market_value : float
+        Current market value
+    pd : float
+        Probability of Default
+    seniority : str
+        Seniority level
+    liquidity_horizon : int
+        Liquidity horizon in months
+    is_long : bool
+        Long or short position
+
+    Returns:
+    --------
+    dict
+        IRC calculation with PD-derived rating
+    """
+    position = create_irc_position_from_pd(
+        position_id, issuer, notional, market_value, pd,
+        seniority, liquidity_horizon, is_long
+    )
+
+    result = calculate_irc_position(position)
+
+    # Add PD-related fields
+    result["input_pd"] = pd
+    result["derived_rating"] = get_rating_from_pd(pd)
+
+    return result
+
+
+def calculate_irc_portfolio_from_pd(
+    positions: list[dict],
+    correlation: float = 0.25
+) -> dict:
+    """
+    Calculate IRC for a portfolio using PD-based positions.
+
+    Parameters:
+    -----------
+    positions : list of dict
+        Each dict: position_id, issuer, notional, market_value, pd,
+                   and optionally seniority, liquidity_horizon, is_long
+    correlation : float
+        Inter-issuer correlation
+
+    Returns:
+    --------
+    dict
+        Portfolio IRC calculation
+    """
+    irc_positions = []
+
+    for pos in positions:
+        irc_pos = create_irc_position_from_pd(
+            position_id=pos["position_id"],
+            issuer=pos["issuer"],
+            notional=pos["notional"],
+            market_value=pos["market_value"],
+            pd=pos["pd"],
+            seniority=pos.get("seniority", "senior_unsecured"),
+            liquidity_horizon=pos.get("liquidity_horizon", 3),
+            is_long=pos.get("is_long", True)
+        )
+        irc_positions.append(irc_pos)
+
+    result = calculate_irc_portfolio(irc_positions, correlation)
+
+    # Add summary of PD inputs
+    result["pd_inputs"] = [
+        {"position_id": p["position_id"], "pd": p["pd"], "derived_rating": get_rating_from_pd(p["pd"])}
+        for p in positions
+    ]
+
+    return result
+
+
+def calculate_securitization_specific_risk_from_pd(
+    market_value: float,
+    pd: float,
+    is_resecuritization: bool = False
+) -> dict:
+    """
+    Calculate securitization specific risk using PD.
+
+    Parameters:
+    -----------
+    market_value : float
+        Market value of position
+    pd : float
+        Probability of Default
+    is_resecuritization : bool
+        Whether position is a re-securitization
+
+    Returns:
+    --------
+    dict
+        Specific risk calculation with derived rating
+    """
+    # Derive rating from PD
+    derived_rating = get_rating_from_pd(pd)
+
+    result = calculate_securitization_specific_risk(
+        market_value, derived_rating, is_resecuritization
+    )
+
+    # Add PD-related fields
+    result["input_pd"] = pd
+    result["derived_rating"] = derived_rating
+
+    return result
+
+
 # Example usage
 if __name__ == "__main__":
     print("=" * 70)

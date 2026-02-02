@@ -394,6 +394,98 @@ def calculate_off_balance_sheet_ead(
     }
 
 
+# =============================================================================
+# PD-Based Wrappers (for users with PD data instead of ratings)
+# =============================================================================
+
+# Import rating mapping from IRB module
+from .credit_risk_irb import get_rating_from_pd, RATING_TO_PD
+
+
+def calculate_sa_rwa_from_pd(
+    ead: float,
+    pd: float,
+    exposure_class: str,
+    **kwargs
+) -> dict:
+    """
+    Calculate Basel II SA RWA using PD instead of rating.
+
+    Automatically derives the closest rating from PD, then applies
+    the standard SA risk weights.
+
+    Parameters:
+    -----------
+    ead : float
+        Exposure at Default
+    pd : float
+        Probability of Default (e.g., 0.02 for 2%)
+    exposure_class : str
+        Exposure class (sovereign, bank, corporate, etc.)
+    **kwargs : dict
+        Additional class-specific parameters
+
+    Returns:
+    --------
+    dict
+        SA RWA calculation with derived rating
+    """
+    # Derive rating from PD
+    derived_rating = get_rating_from_pd(pd)
+
+    # Calculate using standard SA function
+    result = calculate_sa_rwa(ead, exposure_class, derived_rating, **kwargs)
+
+    # Add PD-related fields
+    result["input_pd"] = pd
+    result["derived_rating"] = derived_rating
+    result["rating_pd"] = RATING_TO_PD.get(derived_rating, pd)
+
+    return result
+
+
+def calculate_batch_sa_rwa_from_pd(exposures: list[dict]) -> dict:
+    """
+    Calculate Basel II SA RWA for a batch of exposures using PD.
+
+    Each exposure should have 'pd' instead of 'rating'.
+
+    Parameters:
+    -----------
+    exposures : list of dict
+        Each dict: ead, pd, exposure_class, and class-specific params
+
+    Returns:
+    --------
+    dict
+        Aggregated results with derived ratings
+    """
+    results = []
+    total_ead = 0
+    total_rwa = 0
+
+    for exp in exposures:
+        ead = exp["ead"]
+        pd = exp.get("pd", 0.01)  # Default 1% if not specified
+        exposure_class = exp["exposure_class"]
+        kwargs = {k: v for k, v in exp.items()
+                  if k not in ["ead", "pd", "exposure_class"]}
+
+        result = calculate_sa_rwa_from_pd(ead, pd, exposure_class, **kwargs)
+        results.append(result)
+        total_ead += result["ead"]
+        total_rwa += result["rwa"]
+
+    return {
+        "approach": "Basel II SA (PD-based)",
+        "total_ead": total_ead,
+        "total_rwa": total_rwa,
+        "average_risk_weight_pct": (total_rwa / total_ead * 100) if total_ead > 0 else 0,
+        "total_capital_requirement": total_rwa * 0.08,
+        "exposures": results,
+    }
+
+
 # Example usage
 if __name__ == "__main__":
     print("=" * 70)

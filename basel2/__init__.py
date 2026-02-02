@@ -48,6 +48,9 @@ from .credit_risk_sa import (
     get_retail_rw,
     get_real_estate_rw,
     calculate_off_balance_sheet_ead,
+    # PD-based wrappers
+    calculate_sa_rwa_from_pd,
+    calculate_batch_sa_rwa_from_pd,
 )
 
 # Credit Risk - IRB Approaches
@@ -118,6 +121,11 @@ from .basel25_market_risk import (
     VaRParameters,
     IRCPosition,
     CorrelationTradingPosition,
+    # PD-based wrappers
+    create_irc_position_from_pd,
+    calculate_irc_position_from_pd,
+    calculate_irc_portfolio_from_pd,
+    calculate_securitization_specific_risk_from_pd,
 )
 
 # Securitization
@@ -127,6 +135,10 @@ from .securitization import (
     calculate_iaa_rwa,
     compare_securitization_approaches,
     get_rba_risk_weight,
+    # PD-based wrappers
+    calculate_rba_rwa_from_pd,
+    calculate_iaa_rwa_from_pd,
+    compare_securitization_approaches_from_pd,
 )
 
 # Credit Risk Mitigation
@@ -165,6 +177,8 @@ __all__ = [
     "get_retail_rw",
     "get_real_estate_rw",
     "calculate_off_balance_sheet_ead",
+    "calculate_sa_rwa_from_pd",
+    "calculate_batch_sa_rwa_from_pd",
     # IRB Credit Risk
     "calculate_irb_rwa",
     "calculate_firb_rwa",
@@ -220,12 +234,19 @@ __all__ = [
     "VaRParameters",
     "IRCPosition",
     "CorrelationTradingPosition",
+    "create_irc_position_from_pd",
+    "calculate_irc_position_from_pd",
+    "calculate_irc_portfolio_from_pd",
+    "calculate_securitization_specific_risk_from_pd",
     # Securitization
     "calculate_rba_rwa",
     "calculate_sfa_rwa",
     "calculate_iaa_rwa",
     "compare_securitization_approaches",
     "get_rba_risk_weight",
+    "calculate_rba_rwa_from_pd",
+    "calculate_iaa_rwa_from_pd",
+    "compare_securitization_approaches_from_pd",
     # CRM
     "calculate_exposure_with_collateral",
     "calculate_exposure_with_guarantee",

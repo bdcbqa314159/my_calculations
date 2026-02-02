@@ -547,6 +547,163 @@ def compare_securitization_approaches(
     }
 
 
+# =============================================================================
+# PD-Based Wrappers
+# =============================================================================
+
+# Import rating mapping from IRB module
+from .credit_risk_irb import get_rating_from_pd, RATING_TO_PD
+
+
+def calculate_rba_rwa_from_pd(
+    ead: float,
+    pd: float,
+    is_senior: bool = True,
+    is_granular: bool = True
+) -> dict:
+    """
+    Calculate RBA RWA using PD instead of rating.
+
+    Parameters:
+    -----------
+    ead : float
+        Tranche exposure
+    pd : float
+        Probability of Default (e.g., 0.02 for 2%)
+    is_senior : bool
+        Whether tranche is senior
+    is_granular : bool
+        Whether pool is granular
+
+    Returns:
+    --------
+    dict
+        RBA calculation with derived rating
+    """
+    # Derive rating from PD
+    derived_rating = get_rating_from_pd(pd)
+
+    # Calculate using standard RBA function
+    result = calculate_rba_rwa(ead, derived_rating, is_senior, is_granular)
+
+    # Add PD-related fields
+    result["input_pd"] = pd
+    result["derived_rating"] = derived_rating
+    result["rating_pd"] = RATING_TO_PD.get(derived_rating, pd)
+
+    return result
+
+
+def calculate_iaa_rwa_from_pd(
+    ead: float,
+    pd: float,
+    is_senior: bool = True,
+    is_granular: bool = True
+) -> dict:
+    """
+    Calculate IAA RWA using PD to derive internal grade.
+
+    Maps PD to internal grade (1-12) based on rating thresholds.
+
+    Parameters:
+    -----------
+    ead : float
+        Exposure at Default
+    pd : float
+        Probability of Default
+    is_senior : bool
+        Whether tranche is senior
+    is_granular : bool
+        Whether pool is granular
+
+    Returns:
+    --------
+    dict
+        IAA calculation with derived internal grade
+    """
+    # Derive rating from PD
+    derived_rating = get_rating_from_pd(pd)
+
+    # Map rating to internal grade
+    rating_to_grade = {
+        "AAA": 1, "AA+": 2, "AA": 2, "AA-": 2,
+        "A+": 3, "A": 4, "A-": 5,
+        "BBB+": 6, "BBB": 7, "BBB-": 8,
+        "BB+": 9, "BB": 10, "BB-": 11,
+    }
+    internal_grade = rating_to_grade.get(derived_rating, 12)
+
+    # Calculate using standard IAA function
+    result = calculate_iaa_rwa(ead, internal_grade, is_senior, is_granular)
+
+    # Add PD-related fields
+    result["input_pd"] = pd
+    result["derived_rating"] = derived_rating
+    result["rating_pd"] = RATING_TO_PD.get(derived_rating, pd)
+
+    return result
+
+
+def compare_securitization_approaches_from_pd(
+    ead: float,
+    pd: float,
+    attachment: float,
+    detachment: float,
+    kirb: float = 0.06,
+    is_senior: bool = True,
+    is_granular: bool = True,
+    n: int = 25
+) -> dict:
+    """
+    Compare all securitization approaches using PD instead of rating.
+
+    Parameters:
+    -----------
+    ead : float
+        Tranche exposure
+    pd : float
+        Probability of Default for rating derivation
+    attachment : float
+        Attachment point (for SFA)
+    detachment : float
+        Detachment point (for SFA)
+    kirb : float
+        Pool Kirb (for SFA)
+    is_senior : bool
+        Whether senior
+    is_granular : bool
+        Whether granular
+    n : int
+        Effective N (for SFA)
+
+    Returns:
+    --------
+    dict
+        Comparison results
+    """
+    # Derive rating from PD
+    derived_rating = get_rating_from_pd(pd)
+
+    # Use standard comparison with derived rating
+    result = compare_securitization_approaches(
+        ead=ead,
+        rating=derived_rating,
+        attachment=attachment,
+        detachment=detachment,
+        kirb=kirb,
+        is_senior=is_senior,
+        is_granular=is_granular,
+        n=n,
+        internal_grade=None  # Will be calculated from rating
+    )
+
+    # Add PD-related fields
+    result["input_pd"] = pd
+    result["derived_rating"] = derived_rating
+
+    return result
+
+
 # Example usage
 if __name__ == "__main__":
     print("=" * 70)

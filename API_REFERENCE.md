@@ -1250,6 +1250,25 @@ The Basel II functions are available in the `basel2/` package. Key differences f
 
 ---
 
+## PD-to-Rating Mapping
+
+All Basel II modules that traditionally use ratings now have PD-based wrapper functions. These automatically convert PD to the closest rating using the mapping in `credit_risk_irb.py`:
+
+| PD Range | Rating | | PD Range | Rating |
+|----------|--------|-|----------|--------|
+| ≤0.03% | AAA | | 2.75% | BB+ |
+| 0.05% | AA+ | | 4.50% | BB |
+| 0.07% | AA | | 7.50% | BB- |
+| 0.10% | AA- | | 11.00% | B+ |
+| 0.15% | A+ | | 15.00% | B |
+| 0.25% | A | | 20.00% | B- |
+| 0.40% | A- | | 25.00% | CCC+ |
+| 0.60% | BBB+ | | 30.00% | CCC |
+| 1.00% | BBB | | 35.00% | CCC- |
+| 1.75% | BBB- | | 100.00% | D |
+
+---
+
 ## 19. Basel II Credit Risk SA (basel2/credit_risk_sa.py)
 
 ### `calculate_sa_rwa()`
@@ -1339,6 +1358,42 @@ The Basel II functions are available in the `basel2/` package. Key differences f
 | unconditionally_cancellable | 0% |
 | nif_ruf | 50% |
 | repo_style | 100% |
+
+---
+
+### `calculate_sa_rwa_from_pd()`
+**Basel II SA using PD instead of rating**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `ead` | float | Exposure at Default |
+| `pd` | float | Probability of Default (e.g., 0.02 for 2%) |
+| `exposure_class` | str | Exposure class |
+| `**kwargs` | dict | Class-specific parameters |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| *(all SA outputs)* | | Same as `calculate_sa_rwa()` |
+| `input_pd` | float | Input PD value |
+| `derived_rating` | str | Rating derived from PD |
+| `rating_pd` | float | Standard PD for derived rating |
+
+---
+
+### `calculate_batch_sa_rwa_from_pd()`
+**Batch SA calculation using PD**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `exposures` | list[dict] | Each with: ead, pd, exposure_class, and class-specific params |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `approach` | str | "Basel II SA (PD-based)" |
+| `total_ead` | float | Sum of EADs |
+| `total_rwa` | float | Sum of RWAs |
+| `average_risk_weight_pct` | float | Portfolio average RW |
+| `exposures` | list | Individual results with derived ratings |
 
 ---
 
@@ -1903,6 +1958,60 @@ K_BIA = α × Average Gross Income (α = 15%)
 
 ---
 
+### `calculate_irc_position_from_pd()`
+**IRC for single position using PD**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `position_id` | str | Position identifier |
+| `issuer` | str | Issuer name |
+| `notional` | float | Position notional |
+| `market_value` | float | Current market value |
+| `pd` | float | Probability of Default |
+| `seniority` | str | Seniority level (default: "senior_unsecured") |
+| `liquidity_horizon` | int | Liquidity horizon in months (default: 3) |
+| `is_long` | bool | Long position (default: True) |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| *(all IRC position outputs)* | | Same as `calculate_irc_position()` |
+| `input_pd` | float | Input PD value |
+| `derived_rating` | str | Rating derived from PD |
+
+---
+
+### `calculate_irc_portfolio_from_pd()`
+**IRC for portfolio using PD-based positions**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `positions` | list[dict] | Each with: position_id, issuer, notional, market_value, pd, and optionally seniority, liquidity_horizon, is_long |
+| `correlation` | float | Inter-issuer correlation (default: 0.25) |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| *(all IRC portfolio outputs)* | | Same as `calculate_irc_portfolio()` |
+| `pd_inputs` | list[dict] | Per-position: position_id, pd, derived_rating |
+
+---
+
+### `calculate_securitization_specific_risk_from_pd()`
+**Securitization specific risk using PD**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `market_value` | float | Market value of position |
+| `pd` | float | Probability of Default |
+| `is_resecuritization` | bool | Whether re-securitization |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| *(all specific risk outputs)* | | Same as `calculate_securitization_specific_risk()` |
+| `input_pd` | float | Input PD value |
+| `derived_rating` | str | Rating derived from PD |
+
+---
+
 ## 25. Basel II Securitization (basel2/securitization.py)
 
 ### `calculate_rba_rwa()`
@@ -2011,6 +2120,65 @@ K_BIA = α × Average Gross Income (α = 15%)
 | 6-8 | BBB+/BBB/BBB- |
 | 9-11 | BB+/BB/BB- |
 | 12 | Below BB- |
+
+---
+
+### `calculate_rba_rwa_from_pd()`
+**RBA using PD instead of rating**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `ead` | float | Tranche exposure |
+| `pd` | float | Probability of Default (e.g., 0.02 for 2%) |
+| `is_senior` | bool | Senior tranche |
+| `is_granular` | bool | Granular pool |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| *(all RBA outputs)* | | Same as `calculate_rba_rwa()` |
+| `input_pd` | float | Input PD value |
+| `derived_rating` | str | Rating derived from PD |
+| `rating_pd` | float | Standard PD for derived rating |
+
+---
+
+### `calculate_iaa_rwa_from_pd()`
+**IAA using PD to derive internal grade**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `ead` | float | Exposure at Default |
+| `pd` | float | Probability of Default |
+| `is_senior` | bool | Senior tranche |
+| `is_granular` | bool | Granular pool |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| *(all IAA outputs)* | | Same as `calculate_iaa_rwa()` |
+| `input_pd` | float | Input PD value |
+| `derived_rating` | str | Rating derived from PD |
+
+---
+
+### `compare_securitization_approaches_from_pd()`
+**Compare securitization approaches using PD**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `ead` | float | Tranche exposure |
+| `pd` | float | Probability of Default |
+| `attachment` | float | Attachment point |
+| `detachment` | float | Detachment point |
+| `kirb` | float | Pool Kirb |
+| `is_senior` | bool | Senior tranche |
+| `is_granular` | bool | Granular pool |
+| `n` | int | Effective N |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| *(all comparison outputs)* | | Same as `compare_securitization_approaches()` |
+| `input_pd` | float | Input PD value |
+| `derived_rating` | str | Rating derived from PD |
 
 ---
 
