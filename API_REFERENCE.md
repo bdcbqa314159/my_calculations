@@ -6,8 +6,19 @@ Comprehensive input/output documentation for all Basel II, Basel III/IV calculat
 
 ## Table of Contents
 
-### Basel III/IV
-- [1. Core Credit Risk](#1-core-credit-risk-rwa_calcpy)
+### Basel III/IV Core Credit Risk (rwa_calc.py)
+- [SA-CR](#calculate_sa_rwa) - Standardised Approach (all exposure classes)
+- [F-IRB / A-IRB](#calculate_rwa--calculate_airb_rwa) - Foundation & Advanced IRB
+- [MaturityConfig](#maturityconfig-dataclass) - Flexible maturity handling
+- [SME Adjustment](#calculate_sme_correlation_adjustment) - Firm-size correlation adjustment
+- [Regulatory Floors](#regulatory-floors) - PD and LGD floors
+- [Off-Balance Sheet](#calculate_off_balance_sheet_ead) - CCF and EAD calculation
+- [Credit Risk Mitigation](#credit-risk-mitigation-crm---cre22) - Collateral and guarantees
+- [Output Floor](#output-floor-basel-iv---cre10) - 72.5% floor
+- [Input Validation](#input-validation) - Regulatory validation
+- [Securitization](#calculate_sec_sa_rwa) - SEC-SA, SEC-IRBA, ERBA, IAA
+
+### Other Basel III/IV Modules
 - [2. Counterparty Credit Risk](#2-counterparty-credit-risk-counterparty_riskpy)
 - [3. Market Risk](#3-market-risk-market_riskpy)
 - [4. Operational Risk](#4-operational-risk-operational_riskpy)
@@ -47,16 +58,44 @@ Comprehensive input/output documentation for all Basel II, Basel III/IV calculat
 | Input | Type | Description |
 |-------|------|-------------|
 | `ead` | float | Exposure at Default |
-| `exposure_class` | str | "sovereign", "bank", "corporate", "retail", "residential_re", "commercial_re", "defaulted", "equity" |
+| `exposure_class` | str | See exposure classes below |
 | `rating` | str | External rating (e.g., "AAA", "BBB", "unrated") |
-| **Kwargs by class:** |
+| **Kwargs by class:** | | |
 | *bank:* `approach` | str | "ECRA" or "SCRA" |
 | *bank:* `scra_grade` | str | "A", "B", or "C" |
 | *bank:* `short_term` | bool | Maturity <= 3 months |
 | *corporate:* `is_sme` | bool | SME supporting factor |
 | *retail:* `retail_type` | str | "regulatory_retail", "transactor" |
+| *retail:* `currency_mismatch` | bool | FX mismatch (50% add-on, CRE20.97) |
 | *real_estate:* `ltv` | float | Loan-to-Value ratio (0.75 = 75%) |
 | *real_estate:* `income_producing` | bool | Income-producing property |
+| *real_estate:* `currency_mismatch` | bool | FX mismatch (50% add-on) |
+| *pse:* `domestic_currency` | bool | Funded in domestic currency |
+| *pse:* `revenue_raising_power` | bool | Has independent revenue power |
+| *mdb:* `mdb_name` | str | MDB identifier (e.g., "IBRD", "EIB") |
+| *covered_bond:* `issuer_rw` | float | Issuing bank's risk weight |
+| *adc:* `adc_type` | str | "residential" or "commercial" |
+| *adc:* `presold` | bool | Property is pre-sold/pre-leased |
+
+**Supported Exposure Classes:**
+
+| Class | Description | Reference |
+|-------|-------------|-----------|
+| `sovereign` | Central governments, central banks | CRE20.7 |
+| `pse` | Public Sector Entities | CRE20.10-15 |
+| `mdb` | Multilateral Development Banks | CRE20.12-13 |
+| `bank` | Banks and securities firms | CRE20.16-24 |
+| `securities_firm` | Regulated securities firms (as banks) | CRE20.20 |
+| `corporate` | General corporates | CRE20.25-29 |
+| `sme_corporate` | SME corporates (85% factor) | CRE20.43 |
+| `retail` | Regulatory retail | CRE20.47-51 |
+| `residential_re` | Residential real estate | CRE20.71-82 |
+| `commercial_re` | Commercial real estate | CRE20.85-90 |
+| `adc` | Acquisition, Development, Construction | CRE20.91-93 |
+| `defaulted` | Defaulted exposures | CRE20.56-58 |
+| `equity` | Equity holdings | CRE20.52-55 |
+| `subordinated` | Subordinated debt | CRE20.52 |
+| `covered_bond` | Covered bonds | CRE20.45-46 |
 
 | Output | Type | Description |
 |--------|------|-------------|
@@ -67,36 +106,90 @@ Comprehensive input/output documentation for all Basel II, Basel III/IV calculat
 | `risk_weight_pct` | float | Risk weight (%) |
 | `rwa` | float | Risk-weighted assets |
 | `capital_requirement_k` | float | K = RW / 12.5 |
+| `parameters` | dict | All additional parameters used |
+
+**Qualifying MDBs (0% RW):** IBRD, IFC, ADB, AfDB, EBRD, IADB, EIB, NIB, CDB, IsDB, AIIB, NDB
 
 ---
 
-### `calculate_rwa()` / `calculate_airb_rwa()`
-**F-IRB / A-IRB RWA calculation**
+### `calculate_rwa()`
+**F-IRB (Foundation IRB) RWA calculation**
 
 | Input | Type | Description |
 |-------|------|-------------|
 | `ead` | float | Exposure at Default |
 | `pd` | float | Probability of Default (0.01 = 1%) |
-| `lgd` | float | Loss Given Default (0.45 = 45%) |
+| `lgd` | float | Loss Given Default (default: 0.45) |
 | `maturity` | float | Effective maturity in years (default: 2.5) |
-| `asset_class` | str | "corporate", "retail_mortgage", "retail_revolving", "retail_other" |
-| *A-IRB only:* `lgd_downturn` | float | Downturn LGD if different |
-| `maturity_config` | MaturityConfig | Flexible maturity handling (see below) |
+| `asset_class` | str | "corporate", "sme_corporate", "bank", "sovereign", "retail_mortgage", "retail_revolving", "retail_other" |
+| `maturity_config` | MaturityConfig | Flexible maturity handling |
+| `sales_turnover` | float | Annual sales in EUR millions (for SME adjustment, CRE31.8) |
 
 | Output | Type | Description |
 |--------|------|-------------|
-| `approach` | str | "IRB-F" or "A-IRB" |
 | `ead` | float | Input EAD |
-| `pd` | float | Input PD (floored at 0.03%) |
+| `pd` | float | Input PD (floored per asset class) |
 | `lgd` | float | Input LGD |
 | `maturity` | float | Input maturity |
+| `correlation` | float | Asset correlation R (with SME adjustment if applicable) |
+| `capital_requirement_k` | float | Capital requirement K |
+| `risk_weight_pct` | float | Risk weight (%) |
+| `rwa` | float | Risk-weighted assets |
+| `expected_loss` | float | PD × LGD × EAD |
+| `sales_turnover_eur_m` | float | Sales turnover (if provided) |
+| `sme_correlation_adjustment` | float | SME correlation reduction (if applicable) |
+
+---
+
+### `calculate_airb_rwa()`
+**A-IRB (Advanced IRB) RWA calculation**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `ead` | float | Bank-estimated Exposure at Default |
+| `pd` | float | Bank-estimated Probability of Default |
+| `lgd` | float | Bank-estimated LGD (TTC or downturn) |
+| `maturity` | float | Effective maturity in years (default: 2.5) |
+| `asset_class` | str | Asset class for correlation |
+| `lgd_downturn` | float | Explicit downturn LGD (if different from lgd) |
+| `maturity_config` | MaturityConfig | Flexible maturity handling |
+| `sales_turnover` | float | Annual sales in EUR millions (for SME adjustment) |
+| `collateral_type` | str | Collateral type for LGD floor (default: "senior_unsecured") |
+| `apply_lgd_floor_check` | bool | Apply regulatory LGD floor (default: True) |
+| `estimate_downturn` | bool | Estimate downturn LGD from TTC (default: False) |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `approach` | str | "A-IRB" |
+| `ead` | float | Input EAD |
+| `pd` | float | Input PD (floored per asset class) |
+| `lgd_input` | float | Original LGD input |
+| `lgd_downturn` | float | LGD used for calculation |
+| `lgd_floor_applied` | bool | Whether LGD floor was binding |
+| `lgd_floor_value` | float | Applicable LGD floor |
+| `collateral_type` | str | Collateral type used |
 | `correlation` | float | Asset correlation R |
 | `capital_requirement_k` | float | Capital requirement K |
 | `risk_weight_pct` | float | Risk weight (%) |
 | `rwa` | float | Risk-weighted assets |
-| `expected_loss` | float | PD * LGD * EAD |
-| `maturity_config_used` | str | Config class name (if config provided) |
-| `effective_maturity` | float | Maturity after floor/cap (if config provided) |
+| `expected_loss` | float | PD × LGD × EAD |
+| `sales_turnover_eur_m` | float | Sales turnover (if provided) |
+| `sme_correlation_adjustment` | float | SME correlation reduction (if applicable) |
+
+**LGD Floors (Basel IV - CRE32.7-8):**
+
+| Collateral Type | Floor |
+|-----------------|-------|
+| `senior_secured_financial` | 0% |
+| `senior_secured_rre` | 10% |
+| `senior_secured_cre` | 10% |
+| `senior_secured_receivables` | 10% |
+| `senior_secured_other` | 15% |
+| `senior_unsecured` | 25% |
+| `subordinated` | 25% |
+| `retail_secured_rre` | 5% |
+| `retail_unsecured` | 30% |
+| `retail_revolving` | 50% |
 
 ---
 
@@ -146,6 +239,306 @@ result = calculate_airb_rwa(ead=1_000_000, pd=0.01, lgd=0.35, maturity_config=cu
 
 ---
 
+### `calculate_sme_correlation_adjustment()`
+**SME Firm-Size Adjustment (CRE31.8)**
+
+Reduces correlation for SME corporates with annual sales EUR 5-50 million.
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `sales_eur_millions` | float | Annual sales in EUR millions |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| (return) | float | Correlation adjustment (subtract from base R) |
+
+**Formula:** `Adjustment = 0.04 × (1 - (min(max(S, 5), 50) - 5) / 45)`
+
+**Effect:** Reduces correlation by up to 4 percentage points for smallest SMEs.
+
+```python
+from rwa_calc import calculate_sme_correlation_adjustment, calculate_rwa
+
+# Calculate adjustment
+adj = calculate_sme_correlation_adjustment(25)  # EUR 25m sales
+print(f"Correlation reduction: {adj:.4f}")  # ~0.022
+
+# Full RWA calculation with SME adjustment
+result = calculate_rwa(ead=1_000_000, pd=0.01, sales_turnover=25)
+print(f"SME-adjusted RWA: {result['rwa']:,.0f}")
+```
+
+---
+
+### Regulatory Floors
+
+#### `apply_pd_floor()`
+**Apply regulatory PD floor by asset class**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `pd` | float | Input probability of default |
+| `asset_class` | str | Asset class for floor determination |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| (return) | float | PD with floor applied |
+
+**PD Floors by Asset Class:**
+
+| Asset Class | Floor |
+|-------------|-------|
+| corporate, bank, sovereign | 0.03% (3bps) |
+| retail_mortgage, retail_revolving, retail_other | 0.05% (5bps) |
+
+---
+
+#### `apply_lgd_floor()`
+**Apply regulatory LGD floor for A-IRB (CRE32.7-8)**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `lgd` | float | Bank-estimated LGD |
+| `collateral_type` | str | Type of collateral/exposure |
+| `asset_class` | str | Asset class |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| (return) | float | LGD with floor applied |
+
+---
+
+#### `estimate_downturn_lgd()`
+**Estimate downturn LGD from through-the-cycle LGD**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `lgd_ttc` | float | Through-the-cycle LGD estimate |
+| `asset_class` | str | Asset class |
+| `collateral_type` | str | Type of collateral |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| (return) | float | Estimated downturn LGD |
+
+**Typical Downturn Multipliers:** 1.10-1.30× depending on asset class and collateral
+
+---
+
+### `calculate_off_balance_sheet_ead()`
+**Off-Balance Sheet EAD Calculation (CRE32.26-41)**
+
+Calculate EAD for commitments using Credit Conversion Factors.
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `committed_amount` | float | Total committed/limit amount |
+| `drawn_amount` | float | Currently drawn amount |
+| `commitment_type` | str | Type of commitment (see table) |
+| `approach` | str | "SA", "F-IRB", or "A-IRB" |
+| `bank_ccf_estimate` | float | Bank's CCF estimate (A-IRB only) |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `committed_amount` | float | Input committed |
+| `drawn_amount` | float | Input drawn |
+| `undrawn_amount` | float | Committed - Drawn |
+| `ccf` | float | Credit Conversion Factor used |
+| `ead` | float | Drawn + CCF × Undrawn |
+
+**CCF Table:**
+
+| Commitment Type | SA | F-IRB | A-IRB Allowed |
+|-----------------|-----|-------|---------------|
+| `unconditionally_cancellable` | 10% | 10% | No |
+| `conditionally_cancellable` | 40% | 40% | Yes |
+| `short_term_trade` | 20% | 20% | No |
+| `transaction_related` | 50% | 50% | Yes |
+| `committed_revolving` | 40% | 75% | Yes |
+| `direct_credit_substitute` | 100% | 100% | No |
+
+---
+
+### Credit Risk Mitigation (CRM) - CRE22
+
+#### `get_supervisory_haircut()`
+**Get supervisory haircuts for collateral**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `collateral_type` | str | Type of collateral |
+| `holding_period` | str | "repo_style", "other_capital_market", "secured_lending" |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `Hc` | float | Collateral haircut |
+| `He` | float | Exposure haircut |
+| `scaling_factor` | float | Holding period scaling |
+
+---
+
+#### `calculate_exposure_with_collateral()`
+**Apply CRM with comprehensive approach (CRE22.37-68)**
+
+Formula: `E* = max(0, E×(1+He) - C×(1-Hc-Hfx))`
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `ead` | float | Exposure at default |
+| `collateral_value` | float | Market value of collateral |
+| `collateral_type` | str | Type for haircut lookup |
+| `fx_mismatch` | bool | Currency mismatch (8% haircut) |
+| `holding_period` | str | Holding period for scaling |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `original_ead` | float | Input EAD |
+| `collateral_value` | float | Input collateral |
+| `Hc`, `He`, `Hfx` | float | Haircuts applied |
+| `net_exposure` | float | Exposure after CRM |
+| `crm_benefit` | float | EAD reduction |
+| `crm_benefit_pct` | float | Benefit as percentage |
+
+```python
+from rwa_calc import calculate_exposure_with_collateral
+
+result = calculate_exposure_with_collateral(
+    ead=1_000_000,
+    collateral_value=600_000,
+    collateral_type="sovereign_aaa_1y",
+    fx_mismatch=False
+)
+print(f"Net exposure: {result['net_exposure']:,.0f}")
+print(f"CRM benefit: {result['crm_benefit_pct']:.1f}%")
+```
+
+---
+
+#### `calculate_exposure_with_guarantee()`
+**Apply CRM with unfunded protection (CRE22.70-84)**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `ead` | float | Exposure at default |
+| `guarantee_coverage` | float | Proportion covered (0.0-1.0) |
+| `guarantor_rw` | float | Guarantor's risk weight |
+| `obligor_rw` | float | Obligor's risk weight |
+| `approach` | str | "substitution" or "double_default" |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `total_rwa` | float | RWA after guarantee |
+| `effective_rw` | float | Blended risk weight |
+| `crm_benefit` | float | RWA reduction |
+
+---
+
+#### `calculate_double_default_pd()`
+**Double-default treatment for guaranteed exposures (CRE36.99-105)**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `pd_obligor` | float | PD of the obligor |
+| `pd_guarantor` | float | PD of the guarantor |
+| `lgd_guarantor` | float | LGD for guarantor |
+| `correlation` | float | Assumed correlation (default: 0.50) |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `effective_pd` | float | Joint default PD |
+| `pd_reduction` | float | PD benefit |
+| `pd_reduction_pct` | float | Percentage reduction |
+
+---
+
+### Output Floor (Basel IV) - CRE10
+
+#### `apply_output_floor()`
+**Apply 72.5% output floor**
+
+IRB RWA cannot be less than 72.5% of Standardised RWA.
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `irb_rwa` | float | RWA under IRB approach |
+| `sa_rwa` | float | RWA under Standardised Approach |
+| `floor_percentage` | float | Floor percentage (default: 0.725) |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `irb_rwa` | float | Input IRB RWA |
+| `sa_rwa` | float | Input SA RWA |
+| `floor_rwa` | float | 72.5% × SA RWA |
+| `floored_rwa` | float | max(IRB RWA, Floor RWA) |
+| `floor_binding` | bool | True if floor applies |
+| `floor_add_on` | float | Additional RWA from floor |
+| `capital_add_on` | float | Additional capital (8% of add-on) |
+
+```python
+from rwa_calc import apply_output_floor
+
+result = apply_output_floor(irb_rwa=500_000, sa_rwa=800_000)
+print(f"Floor binding: {result['floor_binding']}")  # True
+print(f"Floored RWA: {result['floored_rwa']:,.0f}")  # 580,000
+```
+
+---
+
+#### `apply_output_floor_portfolio()`
+**Apply output floor at portfolio level**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `irb_results` | list[dict] | List of IRB results with 'rwa' key |
+| `sa_results` | list[dict] | List of SA results with 'rwa' key |
+| `floor_percentage` | float | Floor percentage |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| (same as apply_output_floor) | | Aggregated portfolio results |
+
+---
+
+### Input Validation
+
+#### `validate_irb_inputs()`
+**Validate IRB inputs against regulatory requirements**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `pd` | float | Probability of Default |
+| `lgd` | float | Loss Given Default |
+| `maturity` | float | Effective maturity |
+| `ead` | float | Exposure at Default |
+| `asset_class` | str | Asset class |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `valid` | bool | True if no errors |
+| `errors` | list[str] | Critical errors |
+| `warnings` | list[str] | Non-critical issues |
+| `adjustments` | dict | Suggested adjustments (e.g., floored values) |
+
+---
+
+#### `classify_exposure()`
+**Determine regulatory exposure class**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `counterparty_type` | str | "sovereign", "bank", "corporate", "retail" |
+| `is_regulated` | bool | Regulated financial institution |
+| `is_sme` | bool | SME flag |
+| `exposure_amount` | float | Total exposure (for retail test) |
+| `annual_sales` | float | Annual sales in EUR |
+| `is_individual` | bool | Natural person |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| (return) | str | Regulatory exposure class |
+
+---
+
 ### `calculate_sec_sa_rwa()`
 **SEC-SA (Securitization Standardised Approach)**
 
@@ -159,6 +552,7 @@ result = calculate_airb_rwa(ead=1_000_000, pd=0.01, lgd=0.35, maturity_config=cu
 | `lgd` | float | Pool average LGD (default: 0.50) |
 | `w` | float | Delinquent ratio (default: 0) |
 | `is_sts` | bool | STS securitization (lower floor) |
+| `is_resecuritization` | bool | Re-securitization (CRE40.68-73) |
 
 | Output | Type | Description |
 |--------|------|-------------|
@@ -168,8 +562,12 @@ result = calculate_airb_rwa(ead=1_000_000, pd=0.01, lgd=0.35, maturity_config=cu
 | `detachment` | float | Detachment point |
 | `thickness` | float | D - A |
 | `ksa` | float | Pool Ksa |
+| `is_resecuritization` | bool | Re-securitization flag |
+| `resec_adjustment` | float | Re-sec multiplier (1.5× if applicable) |
 | `risk_weight_pct` | float | Risk weight (15%-1250%) |
 | `rwa` | float | Risk-weighted assets |
+
+**Re-securitization Treatment:** 100% floor + 1.5× multiplier
 
 ---
 
@@ -185,13 +583,62 @@ result = calculate_airb_rwa(ead=1_000_000, pd=0.01, lgd=0.35, maturity_config=cu
 | `n` | int | Effective number of exposures |
 | `lgd` | float | Pool average LGD |
 | `is_sts` | bool | STS securitization |
+| `is_resecuritization` | bool | Re-securitization (CRE40.68-73) |
 
 | Output | Type | Description |
 |--------|------|-------------|
 | `approach` | str | "SEC-IRBA" |
 | `kirb` | float | Pool Kirb |
+| `is_resecuritization` | bool | Re-securitization flag |
+| `resec_adjustment` | float | Re-sec multiplier (1.5× if applicable) |
 | `risk_weight_pct` | float | Risk weight |
 | `rwa` | float | Risk-weighted assets |
+
+---
+
+### `determine_securitization_approach()`
+**Determine mandatory securitization approach (CRE40.5-7)**
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `pool_is_irb_eligible` | bool | Pool can be treated under IRB |
+| `has_external_rating` | bool | Tranche has external rating |
+| `tranche_is_rated` | bool | Rated by eligible ECAI |
+| `has_iaa_approval` | bool | Bank has IAA approval |
+| `is_abcp` | bool | ABCP exposure |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `approach` | str | "SEC-IRBA", "SEC-ERBA", "SEC-SA", or "IAA" |
+| `rationale` | list[str] | Explanation of approach selection |
+| `alternatives` | list[str] | Other possible approaches |
+
+**Hierarchy (mandatory):**
+1. SEC-IRBA (if pool IRB-eligible)
+2. SEC-ERBA (if external rating available)
+3. SEC-SA (fallback)
+4. IAA (for ABCP with approval)
+
+---
+
+### `apply_securitization_cap()`
+**Apply maximum capital requirement cap (CRE40.19)**
+
+Tranche RWA capped at pro-rata share of pool RWA.
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `tranche_rwa` | float | Calculated tranche RWA |
+| `pool_total_rwa` | float | Total pool RWA |
+| `tranche_ead` | float | Tranche EAD |
+| `pool_total_ead` | float | Total pool EAD |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `capped_rwa` | float | RWA after cap |
+| `cap_binding` | bool | True if cap applies |
+| `cap_benefit` | float | RWA reduction from cap |
+| `pro_rata_share` | float | Tranche share of pool |
 
 ---
 
@@ -407,6 +854,63 @@ result = calculate_airb_rwa(ead=1_000_000, pd=0.01, lgd=0.35, maturity_config=cu
 | `average_risk_weight_pct` | float | Portfolio average RW |
 | `exposure_count` | int | Number of exposures |
 | `exposures` | list | Individual results |
+
+---
+
+### Constants Reference (rwa_calc.py)
+
+**Risk Weight Tables:**
+
+| Constant | Description |
+|----------|-------------|
+| `SA_SOVEREIGN_RW` | Sovereign risk weights by rating |
+| `SA_PSE_RW` | PSE risk weights (one notch below sovereign) |
+| `SA_MDB_RW` | MDB risk weights (0% for qualifying) |
+| `SA_BANK_ECRA_RW` | Bank risk weights (ECRA approach) |
+| `SA_BANK_SCRA_RW` | Bank risk weights (SCRA approach) |
+| `SA_CORPORATE_RW` | Corporate risk weights by rating |
+| `SA_RETAIL_RW` | Retail risk weights |
+| `SA_RESIDENTIAL_RE_RW` | Residential RE by LTV |
+| `SA_COMMERCIAL_RE_RW` | Commercial RE by LTV |
+| `SA_COVERED_BOND_RW` | Covered bond risk weights |
+| `SA_ADC_RW` | ADC risk weights |
+| `SA_DEFAULTED_RW` | Defaulted exposure risk weights |
+| `SA_EQUITY_RW` | Equity risk weights |
+| `QUALIFYING_MDBS` | Set of MDBs qualifying for 0% RW |
+
+**Regulatory Floors:**
+
+| Constant | Description |
+|----------|-------------|
+| `PD_FLOORS` | PD floors by asset class (3-5 bps) |
+| `LGD_FLOORS` | LGD floors by collateral type (0-50%) |
+| `EAD_FLOORS` | EAD/CCF floors |
+
+**Credit Conversion Factors:**
+
+| Constant | Description |
+|----------|-------------|
+| `CCF_TABLE` | Off-balance sheet CCFs by commitment type |
+
+**Credit Risk Mitigation:**
+
+| Constant | Description |
+|----------|-------------|
+| `SUPERVISORY_HAIRCUTS` | Haircuts by collateral type |
+| `FX_MISMATCH_HAIRCUT` | 8% haircut for currency mismatch |
+| `HOLDING_PERIOD_SCALING` | Scaling factors by transaction type |
+
+**ERBA Risk Weights:**
+
+| Constant | Description |
+|----------|-------------|
+| `ERBA_RISK_WEIGHTS` | Securitization ERBA by rating/seniority/maturity |
+
+**PD-Rating Mapping:**
+
+| Constant | Description |
+|----------|-------------|
+| `RATING_TO_PD` | External rating to PD mapping |
 
 ---
 
