@@ -1,0 +1,18 @@
+issuer,rating,tenor_years,notional,region,sector,seniority,is_long,lgd,position_id
+Apple Inc,AA,5.0,20000000,US,tech,senior_unsecured,True,,AAPL_5Y
+Microsoft Corp,AAA,7.0,15000000,US,tech,senior_unsecured,True,,MSFT_7Y
+JPMorgan Chase,A,4.0,18000000,US,financial,senior_unsecured,True,,JPM_4Y
+Wells Fargo,A,5.0,14000000,US,financial,senior_unsecured,True,,WFC_5Y
+Deutsche Bank,A,5.0,12000000,EU,financial,senior_unsecured,True,,DB_5Y
+BNP Paribas,A,4.0,10000000,EU,financial,subordinated,True,,BNP_4Y_SUB
+Barclays,A,3.0,8000000,EU,financial,senior_unsecured,True,,BARC_3Y
+Petrobras,BB,5.0,8000000,EM,energy,senior_secured,True,,PETRO_5Y
+Vale SA,BBB,4.0,7000000,EM,industrial,senior_unsecured,True,,VALE_4Y
+Tencent,A,3.0,10000000,ASIA,tech,senior_unsecured,True,,TENCENT_3Y
+Samsung,AA,5.0,12000000,ASIA,tech,senior_unsecured,True,,SAMSUNG_5Y
+Toyota,A,6.0,15000000,ASIA,auto,senior_unsecured,True,,TOYOTA_6Y
+Pemex,B,4.0,6000000,LATAM,energy,senior_unsecured,True,,PEMEX_4Y
+Ecopetrol,BB,3.0,5000000,LATAM,energy,senior_secured,True,0.30,ECOPETROL_3Y
+Ford Motor,BB,5.0,5000000,US,auto,senior_unsecured,False,,FORD_CDS
+GM,BB,5.0,4000000,US,auto,senior_unsecured,False,,GM_CDS
+Distressed Corp,CCC,2.0,3000000,US,retail,senior_unsecured,True,,DISTRESSED_2Y
