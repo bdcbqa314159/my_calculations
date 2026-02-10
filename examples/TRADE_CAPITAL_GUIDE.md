@@ -1,6 +1,6 @@
 # Trade-Level Full Capital Calculation Guide
 
-How to compute the complete capital stack — Credit RWA + Market Risk (FRTB-SA and FRTB-IMA) — for CDS, TRS, Repo, and CLN trades.
+How to compute the complete capital stack — Credit RWA + Market Risk (FRTB-SA, FRTB-IMA, and IRC) — for CDS, TRS, Repo, and CLN trades.
 
 ## Quick Start
 
@@ -242,3 +242,103 @@ Stressed ES uses a higher volatility (typically 1.5–2× current vol).
 | EQ | other | 120 |
 | COM | other | 120 |
 | CR | other | 120 |
+
+---
+
+## IRC (Incremental Risk Charge) — Basel 2.5
+
+For trading book credit positions, IRC captures both **default risk** and **rating migration risk** over a 1-year horizon at 99.9% confidence.
+
+### When to Use IRC vs FRTB-IMA DRC
+
+| Framework | Default Risk | Migration Risk | Applies To |
+|---|---|---|---|
+| **IRC** (Basel 2.5) | Yes | Yes (spread widening) | Trading book credit |
+| **FRTB-IMA DRC** | Yes | No (in ES via spreads) | Trading book credit |
+| **FRTB-SA DRC** | Yes | No | Trading book credit |
+
+Under FRTB, migration risk is captured in the ES component via credit spread sensitivity. Under Basel 2.5, it's in IRC.
+
+### IRC Inputs
+
+Each position needs:
+
+```python
+from irc import IRCPosition, IRCConfig, calculate_irc
+
+position = IRCPosition(
+    position_id="bond_1",
+    issuer="Corp A",           # obligor name
+    notional=10_000_000,
+    market_value=10_200_000,
+    rating="BBB",              # current rating (AAA to CCC)
+    tenor_years=5.0,           # remaining maturity
+    seniority="senior_unsecured",  # affects LGD
+    sector="corporate",
+    liquidity_horizon_months=3,    # rebalancing frequency
+    is_long=True,
+    coupon_rate=0.045,
+)
+```
+
+### IRC Monte Carlo Process
+
+```
+For each simulation (100,000+):
+    1. Draw systematic factor X ~ N(0,1)
+    2. For each issuer:
+       Z_i = ρ × X + √(1-ρ²) × ε_i
+       U_i = Φ(Z_i)  # convert to uniform
+       new_rating = simulate_migration(current_rating, U_i)
+    3. Calculate loss:
+       - Default: loss = LGD × notional
+       - Migration: loss = Δspread × PV01
+
+IRC = 99.9th percentile of loss distribution
+```
+
+### Rating Transition Matrix
+
+The simulation uses historical 1-year transition probabilities:
+
+| From | Upgrade | Stable | Downgrade | Default |
+|---|---|---|---|---|
+| AAA | 0.0% | 90.8% | 9.2% | 0.00% |
+| AA | 0.7% | 90.7% | 8.6% | 0.02% |
+| A | 2.4% | 91.1% | 6.5% | 0.06% |
+| BBB | 6.3% | 86.9% | 6.6% | 0.18% |
+| BB | 8.6% | 80.5% | 9.8% | 1.06% |
+| B | 7.3% | 83.0% | 4.6% | 5.21% |
+| CCC | 15.4% | 64.9% | 0.0% | 19.78% |
+
+### Example: IRC Calculation
+
+```python
+from irc import IRCPosition, IRCConfig, calculate_irc, calculate_irc_by_issuer
+
+positions = [
+    IRCPosition("b1", "Corp_A", 10_000_000, 10_000_000, "BBB", 5.0),
+    IRCPosition("b2", "Corp_B", 8_000_000, 8_000_000, "BB", 4.0),
+    IRCPosition("b3", "Corp_C", 6_000_000, 6_000_000, "A", 7.0),
+]
+
+config = IRCConfig(
+    num_simulations=100_000,
+    systematic_correlation=0.50,
+)
+
+result = calculate_irc(positions, config)
+print(f"IRC: ${result['irc']:,.0f}")
+print(f"IRC RWA: ${result['rwa']:,.0f}")
+
+# Per-issuer contribution
+issuer_result = calculate_irc_by_issuer(positions, config)
+for c in issuer_result["issuer_contributions"]:
+    print(f"{c['issuer']}: ${c['marginal_irc']:,.0f} ({c['pct_of_total']:.1f}%)")
+```
+
+### IRC Example Script
+
+```bash
+./venv/bin/python examples/irc_full_example.py
+```
