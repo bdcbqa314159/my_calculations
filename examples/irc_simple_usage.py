@@ -337,6 +337,53 @@ except ImportError:
 
 
 # =====================================================================
+# Method 8: Export IRC by Issuer to DataFrame/CSV
+# =====================================================================
+
+print("\n" + "=" * 60)
+print("Method 8: Export IRC by Issuer to DataFrame/CSV")
+print("=" * 60)
+
+try:
+    import pandas as pd
+    from irc import irc_to_dataframe, irc_to_csv
+
+    # Use the issuer breakdown result from earlier (or recalculate)
+    issuer_result = calculate_irc_by_issuer(irc_positions, IRCConfig(num_simulations=50_000))
+
+    # Convert to DataFrame
+    df_irc = irc_to_dataframe(issuer_result)
+
+    print("\nFull DataFrame with summary rows:")
+    print(df_irc.to_string(index=False))
+
+    # Without summary rows (just issuers)
+    df_issuers_only = irc_to_dataframe(issuer_result, include_summary=False)
+
+    print("\n\nIssuers only (no summary rows):")
+    print(df_issuers_only.to_string(index=False))
+
+    # Save directly to CSV
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+        csv_path = f.name
+
+    irc_to_csv(issuer_result, csv_path)
+
+    print(f"\n\nSaved to CSV: {csv_path}")
+    print("\nCSV contents:")
+    with open(csv_path) as f:
+        print(f.read())
+
+    # Clean up
+    import os
+    os.unlink(csv_path)
+
+except ImportError:
+    print("\n  pandas not installed - skipping DataFrame/CSV export example")
+
+
+# =====================================================================
 # Summary
 # =====================================================================
 
