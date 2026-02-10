@@ -24,7 +24,7 @@ What makes a TRS special?
     (EQ_SINGLE, CR_*, COM_*, etc.).
 
 Usage:
-    cd /Users/bernardocohen/repos/work/rwa_calc
+    cd rwa_calc
     ./venv/bin/python examples/trs_full_capital.py
 """
 

@@ -7,7 +7,7 @@ with clear documentation of required columns, optional columns,
 and output format.
 
 Usage:
-    cd /Users/bernardocohen/repos/work/rwa_calc
+    cd rwa_calc
     ./venv/bin/python examples/irc_csv_workflow.py
 """
 

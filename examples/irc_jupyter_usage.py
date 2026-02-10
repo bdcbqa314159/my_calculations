@@ -8,7 +8,7 @@ Usage in Jupyter:
     # In a notebook cell, run each section interactively
 
 Usage from command line:
-    cd /Users/bernardocohen/repos/work/rwa_calc
+    cd rwa_calc
     ./venv/bin/python examples/irc_jupyter_usage.py
 """
 

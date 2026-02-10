@@ -25,7 +25,7 @@ What makes a Repo special?
     ES liquidity horizon for IR (10 days) is particularly relevant.
 
 Usage:
-    cd /Users/bernardocohen/repos/work/rwa_calc
+    cd rwa_calc
     ./venv/bin/python examples/repo_full_capital.py
 """
 

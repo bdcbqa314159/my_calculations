@@ -21,7 +21,7 @@ What makes a CDS special?
     feeds into FRTB-SA CSR delta and FRTB-IMA ES.
 
 Usage:
-    cd /Users/bernardocohen/repos/work/rwa_calc
+    cd rwa_calc
     ./venv/bin/python examples/cds_full_capital.py
 """
 

@@ -29,7 +29,7 @@ What makes a CLN special?
     and reference entity are in the same sector.
 
 Usage:
-    cd /Users/bernardocohen/repos/work/rwa_calc
+    cd rwa_calc
     ./venv/bin/python examples/cln_full_capital.py
 """
 

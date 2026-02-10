@@ -10,7 +10,7 @@ a list of positions defined by:
   - Notional (position size)
 
 Usage:
-    cd /Users/bernardocohen/repos/work/rwa_calc
+    cd rwa_calc
     ./venv/bin/python examples/irc_simple_usage.py
 """
 

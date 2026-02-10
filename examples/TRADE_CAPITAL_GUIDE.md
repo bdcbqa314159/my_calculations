@@ -5,7 +5,7 @@ How to compute the complete capital stack — Credit RWA + Market Risk (FRTB-SA,
 ## Quick Start
 
 ```bash
-cd /Users/bernardocohen/repos/work/rwa_calc
+cd rwa_calc
 
 # Run all four examples
 ./venv/bin/python examples/cds_full_capital.py

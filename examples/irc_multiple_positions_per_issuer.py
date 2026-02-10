@@ -16,7 +16,7 @@ Why this matters:
   - Long vs short positions can offset within the same issuer
 
 Usage:
-    cd /Users/bernardocohen/repos/work/rwa_calc
+    cd rwa_calc
     ./venv/bin/python examples/irc_multiple_positions_per_issuer.py
 """
 

@@ -32,7 +32,7 @@ Monte Carlo Process:
   2. IRC = 99.9th percentile of loss distribution
 
 Usage:
-    cd /Users/bernardocohen/repos/work/rwa_calc
+    cd rwa_calc
     ./venv/bin/python examples/irc_full_example.py
 """
 
