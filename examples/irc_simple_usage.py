@@ -384,6 +384,156 @@ except ImportError:
 
 
 # =====================================================================
+# Method 9: Different Transition Matrices by Region/Sector
+# =====================================================================
+
+print("\n" + "=" * 60)
+print("Method 9: Different Transition Matrices")
+print("=" * 60)
+
+from irc import list_transition_matrices, get_transition_matrix
+
+print("\nAvailable matrices:", list_transition_matrices())
+
+print("""
+Matrices vary by region, sector, and economic conditions:
+  - global/us_corporate: S&P historical average (default)
+  - europe:              European corporates (lower defaults)
+  - emerging_markets/em: EM corporates (higher defaults)
+  - financials:          Banks/insurers
+  - sovereign:           Sovereign ratings
+  - recession/stressed:  Downturn scenario (2008-style)
+  - benign:              Low-default environment
+""")
+
+# Compare IRC under different scenarios
+test_positions = [
+    {"issuer": "Corp A", "rating": "BBB", "tenor_years": 5.0, "notional": 20_000_000},
+    {"issuer": "Corp B", "rating": "BB", "tenor_years": 3.0, "notional": 15_000_000},
+]
+
+print(f"{'Matrix':<20} {'IRC':>14} {'B Default Rate':>16}")
+print("-" * 55)
+
+for matrix_name in ["global", "europe", "emerging_markets", "recession", "benign"]:
+    result = quick_irc(test_positions, num_simulations=30_000, transition_matrix=matrix_name)
+    matrix = get_transition_matrix(matrix_name)
+    b_default = matrix["B"]["D"] * 100
+    print(f"{matrix_name:<20} ${result['irc']:>12,.0f} {b_default:>15.2f}%")
+
+# Custom matrix example
+print("\nCustom matrix example:")
+custom_matrix = {
+    "AAA": {"AAA": 0.90, "AA": 0.08, "A": 0.015, "BBB": 0.003, "BB": 0.001, "B": 0.0005, "CCC": 0.0004, "D": 0.0001},
+    "AA":  {"AAA": 0.01, "AA": 0.90, "A": 0.07, "BBB": 0.015, "BB": 0.003, "B": 0.001, "CCC": 0.0005, "D": 0.0005},
+    "A":   {"AAA": 0.002, "AA": 0.03, "A": 0.90, "BBB": 0.05, "BB": 0.012, "B": 0.004, "CCC": 0.001, "D": 0.001},
+    "BBB": {"AAA": 0.001, "AA": 0.005, "A": 0.06, "BBB": 0.85, "BB": 0.06, "B": 0.015, "CCC": 0.005, "D": 0.004},
+    "BB":  {"AAA": 0.001, "AA": 0.002, "A": 0.008, "BBB": 0.08, "BB": 0.80, "B": 0.08, "CCC": 0.02, "D": 0.009},
+    "B":   {"AAA": 0.0, "AA": 0.001, "A": 0.003, "BBB": 0.005, "BB": 0.07, "B": 0.82, "CCC": 0.05, "D": 0.051},
+    "CCC": {"AAA": 0.002, "AA": 0.0, "A": 0.002, "BBB": 0.015, "BB": 0.025, "B": 0.12, "CCC": 0.64, "D": 0.196},
+    "D":   {"AAA": 0.0, "AA": 0.0, "A": 0.0, "BBB": 0.0, "BB": 0.0, "B": 0.0, "CCC": 0.0, "D": 1.0},
+}
+result_custom = quick_irc(test_positions, num_simulations=30_000, transition_matrix=custom_matrix)
+print(f"  IRC with custom matrix: ${result_custom['irc']:,.0f}")
+
+
+# =====================================================================
+# Method 10: Multi-Matrix IRC (Mixed Regions/Sectors)
+# =====================================================================
+
+print("\n" + "=" * 60)
+print("Method 10: Multi-Matrix IRC (Mixed Regions/Sectors)")
+print("=" * 60)
+
+print("""
+When your portfolio has positions from different regions or sectors,
+you can apply different transition matrices to each group.
+
+Priority order: issuer > sector > region > default
+""")
+
+# Mixed portfolio
+mixed_positions = [
+    # US Tech
+    {"issuer": "Apple", "rating": "AA", "tenor_years": 5, "notional": 20_000_000,
+     "region": "US", "sector": "tech"},
+    {"issuer": "Microsoft", "rating": "AAA", "tenor_years": 7, "notional": 15_000_000,
+     "region": "US", "sector": "tech"},
+
+    # EU Financials
+    {"issuer": "Deutsche Bank", "rating": "A", "tenor_years": 5, "notional": 12_000_000,
+     "region": "EU", "sector": "financial"},
+    {"issuer": "BNP Paribas", "rating": "A", "tenor_years": 4, "notional": 10_000_000,
+     "region": "EU", "sector": "financial"},
+
+    # EM Energy
+    {"issuer": "Petrobras", "rating": "BB", "tenor_years": 5, "notional": 8_000_000,
+     "region": "EM", "sector": "energy"},
+    {"issuer": "Pemex", "rating": "B", "tenor_years": 4, "notional": 6_000_000,
+     "region": "EM", "sector": "energy"},
+]
+
+# Single matrix (baseline)
+result_single = quick_irc(mixed_positions, num_simulations=30_000)
+print(f"Single 'global' matrix:           ${result_single['irc']:,.0f}")
+
+# By region
+result_region = quick_irc(
+    mixed_positions,
+    num_simulations=30_000,
+    matrix_by_region={
+        "US": "global",
+        "EU": "europe",
+        "EM": "emerging_markets",
+    }
+)
+print(f"By region (US/EU/EM):             ${result_region['irc']:,.0f}")
+
+# By region + sector override
+result_mixed = quick_irc(
+    mixed_positions,
+    num_simulations=30_000,
+    matrix_by_region={
+        "US": "global",
+        "EU": "europe",
+        "EM": "emerging_markets",
+    },
+    matrix_by_sector={
+        "financial": "financials",  # EU banks use financials matrix
+    },
+)
+print(f"By region + sector override:      ${result_mixed['irc']:,.0f}")
+
+# With issuer-specific stress
+result_stress = quick_irc(
+    mixed_positions,
+    num_simulations=30_000,
+    matrix_by_region={
+        "US": "global",
+        "EU": "europe",
+        "EM": "emerging_markets",
+    },
+    matrix_by_sector={
+        "financial": "financials",
+    },
+    matrix_by_issuer={
+        "Pemex": "recession",  # stress test specific issuer
+    },
+)
+print(f"+ Pemex stressed (recession):     ${result_stress['irc']:,.0f}")
+
+print(f"\nMatrices used: {result_mixed.get('matrices_used', [])}")
+
+print("""
+Resolution example:
+  Apple (US, tech)           → region["US"]       → "global"
+  Deutsche Bank (EU, financial) → sector["financial"] → "financials"
+  Petrobras (EM, energy)     → region["EM"]       → "emerging_markets"
+  Pemex (EM, energy)         → issuer["Pemex"]    → "recession"
+""")
+
+
+# =====================================================================
 # Summary
 # =====================================================================
 
@@ -409,6 +559,16 @@ OPTIONAL (defaults applied if not provided):
   - market_value: notional (default) - current market value
 
 SIMULATION CONFIG:
-  - num_simulations: 50,000-100,000 recommended
-  - correlation:     0.50 typical (0.20-0.80 range)
+  - num_simulations:   50,000-100,000 recommended
+  - correlation:       0.50 typical (0.20-0.80 range)
+  - transition_matrix: "global" (default)
+                       Options: global, europe, em, financials,
+                                sovereign, recession, benign
+                       Or pass custom dict
+
+MULTI-MATRIX (for mixed portfolios):
+  - matrix_by_region:  {"US": "global", "EU": "europe", "EM": "em"}
+  - matrix_by_sector:  {"financial": "financials", "sovereign": "sovereign"}
+  - matrix_by_issuer:  {"Pemex": "recession"}  # highest priority
+  Priority: issuer > sector > region > default
 """)
