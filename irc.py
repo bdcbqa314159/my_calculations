@@ -1593,6 +1593,9 @@ def calculate_irc_by_issuer(
     """
     Calculate IRC with breakdown by issuer contribution.
 
+    Uses a single Monte Carlo simulation to compute both portfolio IRC
+    and per-issuer marginal contributions consistently.
+
     Parameters
     ----------
     positions : list[IRCPosition]
@@ -1605,31 +1608,117 @@ def calculate_irc_by_issuer(
     dict
         IRC with per-issuer marginal contributions.
     """
+    import numpy as np
+    from scipy.stats import norm
+
     if config is None:
         config = IRCConfig()
 
-    # Full portfolio IRC
-    full_result = calculate_irc(positions, config)
-    full_irc = full_result["irc"]
+    num_sims = config.num_simulations
+    conf = config.confidence_level
+    rho = config.systematic_correlation
 
-    # Group by issuer
+    # Get transition matrix
+    matrix = get_transition_matrix(config.transition_matrix)
+
+    # Group positions by issuer
     issuer_positions: dict[str, list[IRCPosition]] = {}
     for pos in positions:
         issuer_positions.setdefault(pos.issuer, []).append(pos)
 
-    # Calculate marginal contribution per issuer
-    issuer_contributions = []
-    for issuer, issuer_pos_list in issuer_positions.items():
-        # Standalone IRC for this issuer
-        standalone = calculate_irc(issuer_pos_list, config)
+    issuers = list(issuer_positions.keys())
+    num_issuers = len(issuers)
 
-        # IRC without this issuer (for marginal contribution)
-        other_positions = [p for p in positions if p.issuer != issuer]
-        if other_positions:
-            without = calculate_irc(other_positions, config)
-            marginal = full_irc - without["irc"]
-        else:
-            marginal = full_irc
+    # Pre-compute position data
+    issuer_to_idx = {issuer: i for i, issuer in enumerate(issuers)}
+
+    # For each position, store: issuer_idx, notional, lgd, rating, tenor, direction
+    pos_data = []
+    for pos in positions:
+        pos_data.append({
+            "issuer_idx": issuer_to_idx[pos.issuer],
+            "notional": pos.notional,
+            "lgd": get_lgd(pos),
+            "rating": pos.rating,
+            "tenor": pos.tenor_years,
+            "direction": 1.0 if pos.is_long else -1.0,
+            "coupon": pos.coupon_rate,
+        })
+
+    # Set random seed
+    if config.seed is not None:
+        np.random.seed(config.seed)
+
+    # Generate correlated factors for all issuers (single simulation)
+    systematic = np.random.normal(0, 1, num_sims)
+    idiosyncratic = np.random.normal(0, 1, (num_sims, num_issuers))
+    Z = rho * systematic[:, np.newaxis] + np.sqrt(1 - rho**2) * idiosyncratic
+    U = norm.cdf(Z)  # (num_sims, num_issuers)
+
+    # Simulate new ratings for each issuer in each simulation
+    issuer_new_ratings = np.empty((num_sims, num_issuers), dtype=object)
+    for i, issuer in enumerate(issuers):
+        rating = issuer_positions[issuer][0].rating
+        probs = matrix[rating]
+        cumulative = 0.0
+        thresholds = []
+        for cat in RATING_CATEGORIES:
+            cumulative += probs[cat]
+            thresholds.append((cumulative, cat))
+
+        for sim in range(num_sims):
+            u = U[sim, i]
+            new_rating = "D"
+            for thresh, cat in thresholds:
+                if u <= thresh:
+                    new_rating = cat
+                    break
+            issuer_new_ratings[sim, i] = new_rating
+
+    # Calculate losses per simulation for full portfolio and per-issuer exclusions
+    full_losses = np.zeros(num_sims)
+    issuer_losses = {issuer: np.zeros(num_sims) for issuer in issuers}
+
+    for sim in range(num_sims):
+        for pd in pos_data:
+            issuer_idx = pd["issuer_idx"]
+            issuer = issuers[issuer_idx]
+            new_rating = issuer_new_ratings[sim, issuer_idx]
+            old_rating = pd["rating"]
+
+            if new_rating == "D":
+                loss = pd["lgd"] * pd["notional"] * pd["direction"]
+            elif new_rating != old_rating:
+                old_spread = CREDIT_SPREADS[old_rating].get(int(pd["tenor"]),
+                             CREDIT_SPREADS[old_rating].get(5, 100))
+                new_spread = CREDIT_SPREADS[new_rating].get(int(pd["tenor"]),
+                             CREDIT_SPREADS[new_rating].get(5, 100))
+                spread_change = (new_spread - old_spread) / 10000
+                duration = (1 - (1 + pd["coupon"])**(-pd["tenor"])) / pd["coupon"] if pd["coupon"] > 0 else pd["tenor"]
+                loss = spread_change * duration * pd["notional"] * pd["direction"]
+            else:
+                loss = 0.0
+
+            full_losses[sim] += loss
+            issuer_losses[issuer][sim] += loss
+
+    # Calculate portfolio IRC (99.9th percentile)
+    full_irc = float(np.percentile(full_losses, conf * 100))
+
+    # Calculate marginal contributions from the SAME simulation
+    # Marginal = full_irc - IRC(portfolio without issuer)
+    issuer_contributions = []
+
+    for issuer in issuers:
+        issuer_pos_list = issuer_positions[issuer]
+
+        # Losses without this issuer
+        without_losses = full_losses - issuer_losses[issuer]
+        without_irc = float(np.percentile(without_losses, conf * 100))
+        marginal = full_irc - without_irc
+
+        # Standalone IRC (just this issuer's losses)
+        standalone_irc = float(np.percentile(issuer_losses[issuer], conf * 100))
 
         issuer_notional = sum(abs(p.notional) for p in issuer_pos_list)
         issuer_rating = issuer_pos_list[0].rating
@@ -1639,7 +1728,7 @@ def calculate_irc_by_issuer(
             "rating": issuer_rating,
             "num_positions": len(issuer_pos_list),
             "notional": issuer_notional,
-            "standalone_irc": standalone["irc"],
+            "standalone_irc": standalone_irc,
             "marginal_irc": marginal,
             "pct_of_total": marginal / full_irc * 100 if full_irc > 0 else 0,
         })
@@ -1647,10 +1736,33 @@ def calculate_irc_by_issuer(
     # Sort by marginal contribution
     issuer_contributions.sort(key=lambda x: x["marginal_irc"], reverse=True)
 
+    # Calculate full result statistics
+    total_notional = sum(abs(p.notional) for p in positions)
+
     return {
-        **full_result,
+        "approach": "IRC (Monte Carlo)",
+        "irc": full_irc,
+        "rwa": full_irc * 12.5,
+        "capital_ratio": full_irc / total_notional if total_notional > 0 else 0,
+        "mean_loss": float(np.mean(full_losses)),
+        "median_loss": float(np.median(full_losses)),
+        "percentile_95": float(np.percentile(full_losses, 95)),
+        "percentile_99": float(np.percentile(full_losses, 99)),
+        "percentile_999": full_irc,
+        "expected_shortfall_999": float(np.mean(full_losses[full_losses >= full_irc])) if np.any(full_losses >= full_irc) else full_irc,
+        "max_loss": float(np.max(full_losses)),
+        "min_loss": float(np.min(full_losses)),
+        "num_simulations": num_sims,
+        "num_positions": len(positions),
+        "num_issuers": num_issuers,
+        "total_notional": total_notional,
         "issuer_contributions": issuer_contributions,
         "diversification_benefit": sum(c["standalone_irc"] for c in issuer_contributions) - full_irc,
+        "config": {
+            "confidence_level": conf,
+            "horizon_years": config.horizon_years,
+            "systematic_correlation": rho,
+        },
     }
 
 
@@ -1681,6 +1793,10 @@ def irc_to_dataframe(result: dict, include_summary: bool = True):
     except ImportError:
         raise ImportError("pandas is required for irc_to_dataframe(). Install with: pip install pandas")
 
+    # Portfolio-level values (same for all rows, for easy filtering/lookup)
+    portfolio_irc = result.get("irc", 0)
+    portfolio_rwa = result.get("rwa", 0)
+
     # Check if this is an issuer breakdown result
     if "issuer_contributions" not in result:
         # Simple result without issuer breakdown - return summary only
@@ -1689,50 +1805,77 @@ def irc_to_dataframe(result: dict, include_summary: bool = True):
             "rating": "-",
             "num_positions": result.get("num_positions", 0),
             "notional": result.get("total_notional", 0),
-            "standalone_irc": result.get("irc", 0),
-            "marginal_irc": result.get("irc", 0),
+            "standalone_irc": portfolio_irc,
+            "marginal_irc": portfolio_irc,
             "pct_of_total": 100.0,
-            "irc": result.get("irc", 0),
-            "rwa": result.get("rwa", 0),
+            "portfolio_irc": portfolio_irc,
+            "portfolio_rwa": portfolio_rwa,
         }])
 
     # Build DataFrame from issuer contributions
     df = pd.DataFrame(result["issuer_contributions"])
 
+    # Add portfolio-level columns (useful for filtering/reporting)
+    df["portfolio_irc"] = portfolio_irc
+    df["portfolio_rwa"] = portfolio_rwa
+
     if include_summary:
-        # Add summary row
-        summary = pd.DataFrame([{
-            "issuer": "TOTAL",
-            "rating": "-",
-            "num_positions": result.get("num_positions", df["num_positions"].sum()),
-            "notional": result.get("total_notional", df["notional"].sum()),
-            "standalone_irc": df["standalone_irc"].sum(),
-            "marginal_irc": df["marginal_irc"].sum(),
-            "pct_of_total": df["pct_of_total"].sum(),
-        }])
+        # Calculate totals
+        sum_standalone = df["standalone_irc"].sum()
+        sum_marginal = df["marginal_irc"].sum()
+        portfolio_irc = result.get("irc", 0)
+        diversification_benefit = result.get("diversification_benefit", sum_standalone - portfolio_irc)
 
-        # Add diversification and portfolio IRC
-        diversification = pd.DataFrame([{
-            "issuer": "DIVERSIFICATION",
-            "rating": "-",
-            "num_positions": 0,
-            "notional": 0,
-            "standalone_irc": -result.get("diversification_benefit", 0),
-            "marginal_irc": 0,
-            "pct_of_total": 0,
-        }])
+        # Add summary rows with clear labeling
+        # The math: Sum(Standalone) - Diversification = Portfolio IRC
+        summary_rows = pd.DataFrame([
+            {
+                "issuer": "--- SUMMARY ---",
+                "rating": "",
+                "num_positions": "",
+                "notional": "",
+                "standalone_irc": "",
+                "marginal_irc": "",
+                "pct_of_total": "",
+                "portfolio_irc": portfolio_irc,
+                "portfolio_rwa": portfolio_rwa,
+            },
+            {
+                "issuer": "Sum of Standalones",
+                "rating": "-",
+                "num_positions": result.get("num_positions", df["num_positions"].sum()),
+                "notional": result.get("total_notional", df["notional"].sum()),
+                "standalone_irc": sum_standalone,
+                "marginal_irc": sum_marginal,
+                "pct_of_total": df["pct_of_total"].sum(),
+                "portfolio_irc": portfolio_irc,
+                "portfolio_rwa": portfolio_rwa,
+            },
+            {
+                "issuer": "Diversification Benefit",
+                "rating": "-",
+                "num_positions": "-",
+                "notional": "-",
+                "standalone_irc": diversification_benefit,
+                "marginal_irc": "-",
+                "pct_of_total": f"{diversification_benefit / sum_standalone * 100:.1f}%" if sum_standalone > 0 else "-",
+                "portfolio_irc": portfolio_irc,
+                "portfolio_rwa": portfolio_rwa,
+            },
+            {
+                "issuer": "PORTFOLIO IRC",
+                "rating": "-",
+                "num_positions": result.get("num_positions", 0),
+                "notional": result.get("total_notional", 0),
+                "standalone_irc": portfolio_irc,
+                "marginal_irc": portfolio_irc,
+                "pct_of_total": "100.0%",
+                "portfolio_irc": portfolio_irc,
+                "portfolio_rwa": portfolio_rwa,
+            },
+        ])
 
-        portfolio = pd.DataFrame([{
-            "issuer": "PORTFOLIO IRC",
-            "rating": "-",
-            "num_positions": result.get("num_positions", 0),
-            "notional": result.get("total_notional", 0),
-            "standalone_irc": result.get("irc", 0),
-            "marginal_irc": result.get("irc", 0),
-            "pct_of_total": 100.0,
-        }])
-
-        df = pd.concat([df, summary, diversification, portfolio], ignore_index=True)
+        df = pd.concat([df, summary_rows], ignore_index=True)
 
     return df
 
