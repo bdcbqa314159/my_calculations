@@ -66,6 +66,30 @@ SECTOR_MATRIX_MAP = {
     "government": "sovereign",
 }
 
+# Currency symbols
+CCY_SYMBOLS = {
+    "USD": "$",
+    "EUR": "€",
+    "GBP": "£",
+    "JPY": "¥",
+    "CHF": "Fr",
+    "CAD": "C$",
+    "AUD": "A$",
+    "CNY": "¥",
+    "HKD": "HK$",
+    "SGD": "S$",
+    "KRW": "₩",
+    "INR": "₹",
+    "BRL": "R$",
+    "MXN": "Mex$",
+    "ZAR": "R",
+}
+
+
+def get_ccy_symbol(ccy: str) -> str:
+    """Get currency symbol for display."""
+    return CCY_SYMBOLS.get(ccy.upper(), ccy)
+
 
 def load_fx_rates(fx_file: str, reference_ccy: str, fx_format: str = "to_reference") -> FXRates:
     """
@@ -112,12 +136,14 @@ def print_header():
 
 def print_summary(df: pd.DataFrame, result: dict, reference_ccy: str):
     """Print results summary."""
+    sym = get_ccy_symbol(reference_ccy)
+
     print("\n" + "-" * 70)
     print("PORTFOLIO SUMMARY")
     print("-" * 70)
     print(f"  Positions:       {len(df)}")
     print(f"  Issuers:         {df['issuer'].nunique()}")
-    print(f"  Total notional:  ${df['notional'].sum():>14,.0f} {reference_ccy}")
+    print(f"  Total notional:  {sym}{df['notional'].sum():>14,.0f} {reference_ccy}")
     print(f"  Avg tenor:       {df['tenor_years'].mean():>14.1f} years")
 
     # Rating distribution
@@ -131,44 +157,50 @@ def print_summary(df: pd.DataFrame, result: dict, reference_ccy: str):
         print(f"\n  Region distribution:")
         for region, group in df.groupby('region'):
             notional = group['notional'].sum()
-            print(f"    {region:>6}: ${notional:>14,.0f} ({len(group)} positions)")
+            print(f"    {region:>6}: {sym}{notional:>14,.0f} ({len(group)} positions)")
 
     print("\n" + "-" * 70)
     print("IRC RESULTS")
     print("-" * 70)
-    print(f"  IRC (99.9%):           ${result['irc']:>14,.0f}")
-    print(f"  IRC RWA:               ${result['rwa']:>14,.0f}")
+    print(f"  IRC (99.9%):           {sym}{result['irc']:>14,.0f}")
+    print(f"  IRC RWA:               {sym}{result['rwa']:>14,.0f}")
     print(f"  Capital ratio:         {result['capital_ratio']*100:>13.2f}%")
 
     print(f"\n  Loss Distribution:")
-    print(f"    Mean loss:           ${result['mean_loss']:>14,.0f}")
-    print(f"    95th percentile:     ${result['percentile_95']:>14,.0f}")
-    print(f"    99th percentile:     ${result['percentile_99']:>14,.0f}")
-    print(f"    99.9th percentile:   ${result['percentile_999']:>14,.0f}")
-    print(f"    Expected Shortfall:  ${result['expected_shortfall_999']:>14,.0f}")
+    print(f"    Mean loss:           {sym}{result['mean_loss']:>14,.0f}")
+    print(f"    95th percentile:     {sym}{result['percentile_95']:>14,.0f}")
+    print(f"    99th percentile:     {sym}{result['percentile_99']:>14,.0f}")
+    print(f"    99.9th percentile:   {sym}{result['percentile_999']:>14,.0f}")
+    print(f"    Expected Shortfall:  {sym}{result['expected_shortfall_999']:>14,.0f}")
 
     if result.get('matrices_used'):
         print(f"\n  Matrices used: {result['matrices_used']}")
 
 
-def print_issuer_breakdown(issuer_result: dict):
+def print_issuer_breakdown(issuer_result: dict, reference_ccy: str):
     """Print issuer breakdown."""
+    sym = get_ccy_symbol(reference_ccy)
+
     print("\n" + "-" * 70)
     print("ISSUER CONTRIBUTIONS")
     print("-" * 70)
-    print(f"\n  {'Issuer':<25} {'Rating':>6} {'Notional':>14} {'Marginal IRC':>14} {'%':>7}")
-    print("  " + "-" * 70)
+    print(f"\n  {'Issuer':<20} {'Rating':>6} {'Notional':>12} {'Standalone':>12} {'Marginal':>12} {'%':>6}")
+    print("  " + "-" * 75)
 
     for c in issuer_result["issuer_contributions"][:15]:  # Top 15
-        print(f"  {c['issuer'][:25]:<25} {c['rating']:>6} ${c['notional']:>12,.0f} "
-              f"${c['marginal_irc']:>12,.0f} {c['pct_of_total']:>6.1f}%")
+        print(f"  {c['issuer'][:20]:<20} {c['rating']:>6} {sym}{c['notional']:>10,.0f} "
+              f"{sym}{c['standalone_irc']:>10,.0f} {sym}{c['marginal_irc']:>10,.0f} {c['pct_of_total']:>5.1f}%")
 
     if len(issuer_result["issuer_contributions"]) > 15:
         print(f"  ... and {len(issuer_result['issuer_contributions']) - 15} more issuers")
 
-    print("  " + "-" * 70)
-    print(f"  {'Diversification benefit:':<48} ${issuer_result['diversification_benefit']:>12,.0f}")
-    print(f"  {'Portfolio IRC:':<48} ${issuer_result['irc']:>12,.0f}")
+    # Calculate sum of standalone IRCs
+    sum_standalone = sum(c['standalone_irc'] for c in issuer_result["issuer_contributions"])
+
+    print("  " + "-" * 75)
+    print(f"  {'Sum of standalone IRCs:':<52} {sym}{sum_standalone:>12,.0f}")
+    print(f"  {'Diversification benefit:':<52} {sym}{issuer_result['diversification_benefit']:>12,.0f}")
+    print(f"  {'Portfolio IRC:':<52} {sym}{issuer_result['irc']:>12,.0f}")
 
 
 def main():
@@ -201,8 +233,8 @@ See examples/sample_raw_portfolio.csv for a template.
     parser.add_argument("--fx-format", choices=["to_reference", "market"],
                         default="to_reference",
                         help="FX rate format: 'to_reference' (1 foreign = X ref) or 'market' (EURUSD=1.08)")
-    parser.add_argument("-n", "--simulations", type=int, default=50_000,
-                        help="Number of MC simulations (default: 50000)")
+    parser.add_argument("-n", "--simulations", type=int, default=100_000,
+                        help="Number of MC simulations (default: 100000)")
     parser.add_argument("--no-issuer-breakdown", action="store_true",
                         help="Skip issuer breakdown calculation")
     parser.add_argument("-q", "--quiet", action="store_true",
@@ -294,7 +326,7 @@ See examples/sample_raw_portfolio.csv for a template.
 
         config = IRCConfig(num_simulations=args.simulations)
         issuer_result = calculate_irc_by_issuer(irc_positions, config)
-        print_issuer_breakdown(issuer_result)
+        print_issuer_breakdown(issuer_result, args.currency)
 
         # Export if requested
         if args.output:
