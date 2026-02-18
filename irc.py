@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from enum import Enum
 
-from rwa_calc import RATING_TO_PD
+from rwa_calc import RATING_TO_PD, get_rating_from_pd
 
 
 # =============================================================================
@@ -43,6 +43,124 @@ from rwa_calc import RATING_TO_PD
 # =============================================================================
 
 RATING_CATEGORIES = ["AAA", "AA", "A", "BBB", "BB", "B", "CCC", "D"]
+
+# -----------------------------------------------------------------------------
+# Rating Normalization — Map granular ratings (AA+, AA-, etc.) to base ratings
+# -----------------------------------------------------------------------------
+# IRC transition matrices use base ratings only. This mapping converts
+# granular ratings (with +/- modifiers) to base ratings.
+
+RATING_TO_BASE = {
+    # AAA (no modifiers typically)
+    "AAA": "AAA",
+    # AA family
+    "AA+": "AA", "AA": "AA", "AA-": "AA",
+    # A family
+    "A+": "A", "A": "A", "A-": "A",
+    # BBB family
+    "BBB+": "BBB", "BBB": "BBB", "BBB-": "BBB",
+    # BB family
+    "BB+": "BB", "BB": "BB", "BB-": "BB",
+    # B family
+    "B+": "B", "B": "B", "B-": "B",
+    # CCC family
+    "CCC+": "CCC", "CCC": "CCC", "CCC-": "CCC",
+    # Default
+    "D": "D", "SD": "D", "NR": "B",  # SD = Selective Default, NR = Not Rated (conservative)
+}
+
+
+def normalize_rating(rating: str) -> str:
+    """
+    Convert a granular rating (AA+, BBB-, etc.) to base rating (AA, BBB, etc.).
+
+    The IRC transition matrix uses base ratings only. This function maps:
+      - AA+, AA, AA- → AA
+      - BBB+, BBB, BBB- → BBB
+      - etc.
+
+    Parameters
+    ----------
+    rating : str
+        Input rating (e.g., "AA+", "BBB-", "B", "CCC+")
+
+    Returns
+    -------
+    str
+        Base rating for IRC (AAA, AA, A, BBB, BB, B, CCC, or D)
+
+    Examples
+    --------
+    >>> normalize_rating("AA+")
+    'AA'
+    >>> normalize_rating("BBB-")
+    'BBB'
+    >>> normalize_rating("B")
+    'B'
+    """
+    # Clean input
+    rating = str(rating).strip().upper()
+
+    # Direct lookup
+    if rating in RATING_TO_BASE:
+        return RATING_TO_BASE[rating]
+
+    # Try stripping +/- if not found
+    base = rating.rstrip("+-")
+    if base in RATING_CATEGORIES:
+        return base
+
+    # Default to B for unknown ratings (conservative but not extreme)
+    return "B"
+
+
+def resolve_rating(rating: str = None, pd: float = None) -> str:
+    """
+    Resolve rating from either a rating string OR a PD value.
+
+    This is the unified entry point for rating conversion. Accepts:
+      - Base rating: "AA", "BBB", "B"
+      - Granular rating: "AA+", "BBB-", "CCC+"
+      - PD value: 0.0016, 0.02, 0.09
+
+    Priority: rating > pd
+
+    Parameters
+    ----------
+    rating : str, optional
+        Rating string (base or granular). Takes priority if provided.
+    pd : float, optional
+        Probability of default (0.0 to 1.0). Used if rating not provided.
+
+    Returns
+    -------
+    str
+        Base rating for IRC (AAA, AA, A, BBB, BB, B, CCC, or D)
+
+    Examples
+    --------
+    >>> resolve_rating(rating="AA+")
+    'AA'
+    >>> resolve_rating(rating="BBB-")
+    'BBB'
+    >>> resolve_rating(pd=0.0016)
+    'A'
+    >>> resolve_rating(pd=0.02)
+    'BB'
+    >>> resolve_rating(rating="BB", pd=0.09)  # rating wins
+    'BB'
+    """
+    if rating is not None:
+        return normalize_rating(rating)
+
+    if pd is not None:
+        # Convert PD to rating, then normalize
+        derived_rating = get_rating_from_pd(pd)
+        return normalize_rating(derived_rating)
+
+    # Default fallback
+    return "B"
+
 
 # -----------------------------------------------------------------------------
 # Global / US Corporate (Default) - S&P historical average
@@ -851,6 +969,10 @@ def calculate_irc(
     if not positions:
         return {"irc": 0.0, "mean_loss": 0.0, "num_simulations": 0}
 
+    # Normalize ratings (AA+ -> AA, BBB- -> BBB, etc.)
+    for pos in positions:
+        pos.rating = normalize_rating(pos.rating)
+
     # Run simulation (vectorized by default for speed)
     if use_vectorized:
         losses = simulate_irc_portfolio_vectorized(positions, config)
@@ -1491,7 +1613,13 @@ def quick_irc(
     Parameters
     ----------
     positions : list[dict]
-        Each dict must have: issuer, notional, rating, tenor_years.
+        Each dict must have: issuer, notional, tenor_years, and ONE OF:
+          - rating: base ("AA") or granular ("AA+", "BBB-")
+          - pd: probability of default (0.0 to 1.0)
+
+        Rating resolution priority: rating > pd
+        Granular ratings are auto-converted: AA+ → AA, BBB- → BBB
+
         Optional fields:
         - seniority: "senior_secured", "senior_unsecured", "subordinated"
         - lgd: float (0.0-1.0) — custom LGD, overrides seniority if provided
@@ -1558,12 +1686,19 @@ def quick_irc(
 
     irc_positions = []
     for i, p in enumerate(positions):
+        # Resolve rating from either 'rating' or 'pd' field
+        # Accepts: base rating (AA), granular rating (AA+), or PD (0.0016)
+        rating = resolve_rating(
+            rating=p.get("rating"),
+            pd=p.get("pd"),
+        )
+
         irc_positions.append(IRCPosition(
             position_id=p.get("position_id", f"pos_{i}"),
             issuer=p["issuer"],
             notional=p["notional"],
             market_value=p.get("market_value", p["notional"]),
-            rating=p["rating"],
+            rating=rating,
             tenor_years=p["tenor_years"],
             seniority=p.get("seniority", "senior_unsecured"),
             sector=p.get("sector", "corporate"),

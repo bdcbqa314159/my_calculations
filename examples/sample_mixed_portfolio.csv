@@ -1,0 +1,11 @@
+Issuer,Rating,PD,Maturity Date,Notional,Currency,Sector,Region,Seniority
+TotalEnergies,A,,2027-06-15,15000000,EUR,energy,EU,Senior
+BNP Paribas,,0.25%,2028-03-20,20000000,EUR,financial,EU,Subordinated
+Siemens AG,BBB+,,2026-12-10,12000000,EUR,industrial,EU,Senior
+Apple Inc,AA-,,2028-09-30,25000000,USD,tech,US,Senior
+JP Morgan,,0.08%,2029-01-15,30000000,USD,financial,US,Senior
+Microsoft,AAA,,2027-11-25,18000000,USD,tech,US,Senior
+HSBC Holdings,A-,,2028-04-10,15000000,GBP,financial,EU,Senior
+Barclays,,0.18%,2027-08-20,10000000,GBP,financial,EU,Subordinated
+Toyota Motor,A,,2028-02-28,2000000000,JPY,auto,ASIA,Senior
+Sony Corp,,0.12%,2027-05-15,1500000000,JPY,tech,ASIA,Senior

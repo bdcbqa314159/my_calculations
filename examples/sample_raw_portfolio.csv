@@ -1,0 +1,26 @@
+Issuer Name,Credit Rating,PD,Maturity Date,Notional Amount,Currency,Industry,Country,Seniority
+Apple Inc,AA+,,2029-06-15,20000000,USD,tech,US,Senior
+Microsoft Corp,AAA,,2030-03-20,15000000,USD,tech,US,Senior
+BMW AG,A,,2027-09-10,12000000,EUR,auto,EU,Senior
+Deutsche Bank,A-,,2028-04-25,18000000,EUR,financial,EU,Subordinated
+BNP Paribas,,0.15%,2027-12-01,15000000,EUR,financial,EU,Senior
+Sony Corp,A,,2028-06-30,800000000,JPY,tech,ASIA,Senior
+Toyota Motor,,0.09%,2029-01-15,1200000000,JPY,auto,ASIA,Senior
+Samsung Electronics,AA-,,2028-08-20,15000000000,KRW,tech,ASIA,Senior
+Petrobras,BB,,2027-03-15,25000000,BRL,energy,EM,Secured
+Vale SA,BBB-,,2028-11-30,30000000,BRL,industrial,EM,Senior
+HSBC Holdings,A,,2029-02-28,10000000,GBP,financial,EU,Senior
+Barclays PLC,,0.12%,2027-07-20,8000000,GBP,financial,EU,Subordinated
+Tencent Holdings,A,,2028-05-10,80000000,HKD,tech,ASIA,Senior
+Alibaba Group,BBB+,,2027-10-25,60000000,HKD,tech,ASIA,Senior
+Exxon Mobil,A+,,2030-06-15,25000000,USD,energy,US,Senior
+Chevron Corp,A,,2029-04-20,20000000,USD,energy,US,Senior
+Shell PLC,A,,2028-12-10,15000000,GBP,energy,EU,Senior
+TotalEnergies,A-,,2029-08-05,18000000,EUR,energy,EU,Senior
+Ford Motor,BB+,,2027-02-28,12000000,USD,auto,US,Senior
+General Motors,BB,,2028-01-15,10000000,USD,auto,US,Senior
+Netflix Inc,BBB,,2027-09-30,8000000,USD,tech,US,Senior
+Tesla Inc,BBB-,,2028-03-20,15000000,USD,auto,US,Senior
+Volkswagen AG,BBB+,,2029-05-12,20000000,EUR,auto,EU,Senior
+Daimler AG,A-,,2028-07-18,16000000,EUR,auto,EU,Senior
+Rio Tinto,A,,2029-11-25,12000000,GBP,industrial,EU,Senior
