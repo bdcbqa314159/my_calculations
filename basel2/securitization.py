@@ -23,6 +23,51 @@ from enum import Enum
 # Ratings-Based Approach (RBA) - Para 611-618
 # =============================================================================
 
+# =============================================================================
+# RE-SECURITISATION RW TABLE (Para 611-615, higher RWs for CDO-squared, etc.)
+# =============================================================================
+
+# RE-SECURITISATION: Rating Grade -> (Senior RW, Non-Senior RW)
+# Higher RWs for CDO-squared, re-packaged securitisations, etc.
+RESEC_RISK_WEIGHTS = {
+    1:  (20, 30),     # AAA
+    2:  (30, 40),     # AA
+    3:  (40, 50),     # A+
+    4:  (50, 65),     # A
+    5:  (65, 85),     # A-
+    6:  (85, 100),    # BBB+
+    7:  (100, 125),   # BBB
+    8:  (125, 150),   # BBB-
+    9:  (425, 550),   # BB+
+    10: (650, 850),   # BB
+    11: (950, 1250),  # BB-
+    12: (1250, 1250), # Below BB-
+}
+
+# Rating grade to label mapping
+RESEC_RATING_LABELS = {
+    1: "AAA", 2: "AA", 3: "A+", 4: "A", 5: "A-",
+    6: "BBB+", 7: "BBB", 8: "BBB-",
+    9: "BB+", 10: "BB", 11: "BB-", 12: "Below BB-",
+}
+
+# PD thresholds for rating grade mapping (for re-securitisation)
+RESEC_PD_THRESHOLDS = [
+    (0.0001, 1),   # <= 0.01%  -> AAA
+    (0.0003, 2),   # <= 0.03%  -> AA
+    (0.0005, 3),   # <= 0.05%  -> A+
+    (0.0010, 4),   # <= 0.10%  -> A
+    (0.0020, 5),   # <= 0.20%  -> A-
+    (0.0035, 6),   # <= 0.35%  -> BBB+
+    (0.0060, 7),   # <= 0.60%  -> BBB
+    (0.0100, 8),   # <= 1.00%  -> BBB-
+    (0.0200, 9),   # <= 2.00%  -> BB+
+    (0.0400, 10),  # <= 4.00%  -> BB
+    (0.0800, 11),  # <= 8.00%  -> BB-
+    (1.0000, 12),  # > 8.00%   -> Below BB-
+]
+
+
 # RBA Risk Weights for long-term ratings (Para 615)
 RBA_RISK_WEIGHTS_LONG_TERM = {
     # Senior tranches (thick)
@@ -181,6 +226,151 @@ def calculate_rba_rwa(
         "rwa": rwa,
         "deduction": deduction,
         "capital_requirement": capital,
+    }
+
+
+# =============================================================================
+# RE-SECURITISATION (Para 611-615)
+# =============================================================================
+
+def pd_to_resec_grade(pd: float) -> tuple[int, str]:
+    """
+    Map PD to re-securitisation rating grade.
+
+    Args:
+        pd: Probability of Default as decimal
+
+    Returns:
+        Tuple of (grade, rating_label)
+    """
+    for threshold, grade in RESEC_PD_THRESHOLDS:
+        if pd <= threshold:
+            return grade, RESEC_RATING_LABELS[grade]
+    return 12, RESEC_RATING_LABELS[12]
+
+
+def get_resec_risk_weight(
+    rating_grade: int,
+    is_senior: bool = True
+) -> float:
+    """
+    Get re-securitisation risk weight.
+
+    Args:
+        rating_grade: Rating grade 1-12
+        is_senior: Whether tranche is senior
+
+    Returns:
+        Risk weight as percentage
+    """
+    grade = max(1, min(12, rating_grade))
+    senior_rw, non_senior_rw = RESEC_RISK_WEIGHTS[grade]
+    return senior_rw if is_senior else non_senior_rw
+
+
+def calculate_resec_rwa(
+    ead: float,
+    rating_grade: int = None,
+    pd: float = None,
+    is_senior: bool = True
+) -> dict:
+    """
+    Calculate RWA for re-securitisation exposures.
+
+    Re-securitisation includes CDO-squared, re-packaged securitisations,
+    and other structures where the underlying pool contains securitisation
+    exposures.
+
+    Args:
+        ead: Exposure at Default
+        rating_grade: Rating grade 1-12 (if known)
+        pd: Probability of Default (used to derive rating if grade not provided)
+        is_senior: Whether tranche is senior
+
+    Returns:
+        dict with RWA calculation
+    """
+    if rating_grade is None:
+        if pd is None:
+            raise ValueError("Must provide either rating_grade or pd")
+        rating_grade, rating_label = pd_to_resec_grade(pd)
+    else:
+        rating_label = RESEC_RATING_LABELS.get(rating_grade, "N/A")
+
+    risk_weight = get_resec_risk_weight(rating_grade, is_senior)
+
+    if risk_weight >= 1250:
+        rwa = 0
+        deduction = ead
+        capital = ead
+    else:
+        rwa = ead * risk_weight / 100
+        deduction = 0
+        capital = rwa * 0.08
+
+    return {
+        "approach": "Basel II RBA (Re-Securitisation)",
+        "ead": ead,
+        "rating_grade": rating_grade,
+        "rating_label": rating_label,
+        "is_senior": is_senior,
+        "is_resec": True,
+        "risk_weight_pct": risk_weight,
+        "rwa": rwa,
+        "deduction": deduction,
+        "capital_requirement": capital,
+    }
+
+
+def compare_sec_vs_resec(
+    ead: float,
+    rating: str,
+    is_senior: bool = True,
+    is_granular: bool = True
+) -> dict:
+    """
+    Compare standard securitisation vs re-securitisation RWA.
+
+    Args:
+        ead: Exposure at Default
+        rating: External rating
+        is_senior: Whether senior
+        is_granular: Whether granular (for standard sec)
+
+    Returns:
+        dict with comparison
+    """
+    # Standard securitisation
+    sec_result = calculate_rba_rwa(ead, rating, is_senior, is_granular)
+
+    # Map rating to re-sec grade
+    rating_to_grade = {
+        "AAA": 1, "AA+": 2, "AA": 2, "AA-": 2,
+        "A+": 3, "A": 4, "A-": 5,
+        "BBB+": 6, "BBB": 7, "BBB-": 8,
+        "BB+": 9, "BB": 10, "BB-": 11,
+    }
+    grade = rating_to_grade.get(rating, 12)
+
+    # Re-securitisation
+    resec_result = calculate_resec_rwa(ead, rating_grade=grade, is_senior=is_senior)
+
+    return {
+        "ead": ead,
+        "rating": rating,
+        "is_senior": is_senior,
+        "standard_sec": {
+            "risk_weight_pct": sec_result["risk_weight_pct"],
+            "rwa": sec_result["rwa"],
+            "capital": sec_result["capital_requirement"],
+        },
+        "resec": {
+            "risk_weight_pct": resec_result["risk_weight_pct"],
+            "rwa": resec_result["rwa"],
+            "capital": resec_result["capital_requirement"],
+        },
+        "rw_difference_pct": resec_result["risk_weight_pct"] - sec_result["risk_weight_pct"],
+        "capital_difference": resec_result["capital_requirement"] - sec_result["capital_requirement"],
     }
 
 

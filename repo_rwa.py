@@ -19,35 +19,9 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
-from rwa_calc import calculate_rwa, calculate_sa_rwa, RATING_TO_PD
+from rwa_calc import calculate_rwa, calculate_sa_rwa
+from ratings import RATING_TO_PD, resolve_pd, resolve_rating_log_scale
 from capital_framework import SUPERVISORY_HAIRCUTS, calculate_collateral_haircut
-
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
-def _resolve_pd(pd: Optional[float], rating: Optional[str]) -> float:
-    """Get PD from explicit value or rating lookup."""
-    if pd is not None:
-        return pd
-    if rating is not None and rating != "unrated":
-        return RATING_TO_PD.get(rating, RATING_TO_PD.get("BBB", 0.004))
-    return 0.004
-
-
-def _resolve_rating(rating: Optional[str], pd: Optional[float]) -> str:
-    """Get a rating string, falling back to PD-based estimation."""
-    if rating is not None:
-        return rating
-    if pd is not None:
-        best, best_dist = "unrated", float("inf")
-        for r, rpd in RATING_TO_PD.items():
-            d = abs(math.log(max(pd, 1e-8)) - math.log(max(rpd, 1e-8)))
-            if d < best_dist:
-                best, best_dist = r, d
-        return best
-    return "unrated"
 
 
 # =============================================================================
@@ -246,8 +220,8 @@ def calculate_repo_ccr(trade: RepoTrade, e_star: float) -> dict:
             "details": "Net exposure E* is zero - fully collateralised.",
         }
 
-    cp_rating = _resolve_rating(trade.counterparty_rating, trade.counterparty_pd)
-    cp_pd = _resolve_pd(trade.counterparty_pd, trade.counterparty_rating)
+    cp_rating = resolve_rating_log_scale(trade.counterparty_rating, trade.counterparty_pd)
+    cp_pd = resolve_pd(trade.counterparty_pd, trade.counterparty_rating)
 
     if trade.approach == "irb":
         result = calculate_rwa(
@@ -301,8 +275,8 @@ def calculate_repo_rwa(trade: RepoTrade) -> dict:
     total_rwa = ccr["rwa"]
     total_capital = total_rwa * 0.08
 
-    cp_rating = _resolve_rating(trade.counterparty_rating, trade.counterparty_pd)
-    cp_pd = _resolve_pd(trade.counterparty_pd, trade.counterparty_rating)
+    cp_rating = resolve_rating_log_scale(trade.counterparty_rating, trade.counterparty_pd)
+    cp_pd = resolve_pd(trade.counterparty_pd, trade.counterparty_rating)
 
     trade_summary = {
         "cash_amount": trade.cash_amount,

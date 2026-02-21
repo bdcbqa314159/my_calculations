@@ -1,16 +1,22 @@
 """
-CRR ERBA (External Ratings-Based Approach) for Securitisations
-==============================================================
+CRR2 ERBA (External Ratings-Based Approach) for Securitisations
+================================================================
 
 This module implements the Basel III / CRR2 ERBA methodology for calculating
-Risk-Weighted Assets (RWA) on securitisation exposures.
+Risk-Weighted Assets (RWA) on securitisation exposures per CRR2 Articles 263-264.
+
+Key Features:
+- CQS (Credit Quality Step) 1-17 mapping
+- Maturity adjustment: a + b × M_T
+- Thickness adjustment: T^(-c) for non-senior tranches
+- STS (Simple, Transparent, Standardised) support with reduced floors
 
 Required Inputs:
     - CQS (Credit Quality Step) or PD (Probability of Default)
     - Seniority: "senior" or "non-senior"
     - M_T: Tranche maturity in years (floored at 1, capped at 5)
     - T: Tranche thickness = Detachment - Attachment (for non-senior only)
-    - is_STS: Whether the securitisation qualifies as STS (Simple, Transparent, Standardised)
+    - is_STS: Whether the securitisation qualifies as STS
 
 Formulas:
     Senior:     RW = RW_base × (a + b × M_T)
@@ -19,9 +25,10 @@ Formulas:
 Reference: CRR2 Articles 263-264
 """
 
-from typing import Tuple, Optional
 from dataclasses import dataclass
-from enum import Enum
+from typing import Optional, Tuple
+
+from ratings import RATING_TO_PD, get_rating_from_pd
 
 
 # =============================================================================
@@ -100,6 +107,8 @@ CQS_TO_RATING = {
     13: "CCC+", 14: "CCC", 15: "CCC-", 16: "CC", 17: "C/D"
 }
 
+RATING_TO_CQS = {v: k for k, v in CQS_TO_RATING.items()}
+
 
 # =============================================================================
 # DATA CLASSES
@@ -126,27 +135,27 @@ class ERBAResult:
     M_T: float
     T: Optional[float]
     is_STS: bool
-    
+
     # Lookup values
     RW_base: float
     a: float
     b: float
     c: Optional[float]
-    
+
     # Intermediate calculations
     maturity_factor: float
     thickness_factor: Optional[float]
     RW_unadjusted: float
-    
+
     # Final result
     floor: float
     cap: float
     RW_final: float
-    
+
     # RWA (if exposure provided)
     exposure: Optional[float] = None
     RWA: Optional[float] = None
-    
+
     def __str__(self) -> str:
         """Pretty print the result."""
         lines = [
@@ -168,19 +177,19 @@ class ERBAResult:
             f"  c:          {self.c}" if self.c else "  c:          N/A (senior)",
             "",
             "CALCULATION:",
-            f"  Maturity factor (a + b × M_T):  {self.a} + {self.b} × {self.M_T} = {self.maturity_factor:.4f}",
+            f"  Maturity factor (a + b * M_T):  {self.a} + {self.b} * {self.M_T} = {self.maturity_factor:.4f}",
         ]
-        
+
         if self.seniority.lower() == "senior":
-            lines.append(f"  RW = RW_base × maturity_factor")
-            lines.append(f"     = {self.RW_base:.2%} × {self.maturity_factor:.4f}")
+            lines.append(f"  RW = RW_base * maturity_factor")
+            lines.append(f"     = {self.RW_base:.2%} * {self.maturity_factor:.4f}")
             lines.append(f"     = {self.RW_unadjusted:.2%}")
         else:
             lines.append(f"  Thickness factor (T^-c):        {self.T}^(-{self.c}) = {self.thickness_factor:.4f}")
-            lines.append(f"  RW = RW_base × maturity_factor × thickness_factor")
-            lines.append(f"     = {self.RW_base:.2%} × {self.maturity_factor:.4f} × {self.thickness_factor:.4f}")
+            lines.append(f"  RW = RW_base * maturity_factor * thickness_factor")
+            lines.append(f"     = {self.RW_base:.2%} * {self.maturity_factor:.4f} * {self.thickness_factor:.4f}")
             lines.append(f"     = {self.RW_unadjusted:.2%}")
-        
+
         lines.extend([
             "",
             "FLOOR/CAP:",
@@ -190,14 +199,14 @@ class ERBAResult:
             "FINAL RESULT:",
             f"  RW_final:   {self.RW_final:.2%}",
         ])
-        
+
         if self.exposure is not None:
             lines.extend([
                 "",
                 f"  Exposure:   {self.exposure:,.2f}",
                 f"  RWA:        {self.RWA:,.2f}",
             ])
-        
+
         lines.append("=" * 60)
         return "\n".join(lines)
 
@@ -209,16 +218,12 @@ class ERBAResult:
 def pd_to_cqs(pd: float) -> int:
     """
     Map Probability of Default to Credit Quality Step.
-    
+
     Args:
         pd: Probability of Default as decimal (e.g., 0.0003 for 0.03%)
-    
+
     Returns:
         CQS: Credit Quality Step (1-17)
-    
-    Example:
-        >>> pd_to_cqs(0.0003)  # 0.03%
-        2  # AA equivalent
     """
     for threshold, cqs in PD_TO_CQS_THRESHOLDS:
         if pd <= threshold:
@@ -226,19 +231,45 @@ def pd_to_cqs(pd: float) -> int:
     return 17
 
 
-def pd_to_seniority(pd: float, threshold: float = 0.0010) -> str:
+def rating_to_cqs(rating: str) -> int:
+    """
+    Map external rating to Credit Quality Step.
+
+    Args:
+        rating: External rating (e.g., "AA", "BBB+")
+
+    Returns:
+        CQS: Credit Quality Step (1-17)
+    """
+    # Direct mapping for exact matches
+    if rating in RATING_TO_CQS:
+        return RATING_TO_CQS[rating]
+
+    # Handle rating modifiers (AA+, AA-)
+    base_rating = rating.rstrip("+-")
+    if base_rating in RATING_TO_CQS:
+        cqs = RATING_TO_CQS[base_rating]
+        if rating.endswith("+") and cqs > 1:
+            return cqs - 1
+        elif rating.endswith("-") and cqs < 17:
+            return cqs + 1
+        return cqs
+
+    # Fallback: use PD mapping
+    pd = RATING_TO_PD.get(rating, 0.10)
+    return pd_to_cqs(pd)
+
+
+def infer_seniority(pd: float, threshold: float = 0.0010) -> str:
     """
     Infer seniority from PD (heuristic when structural data unavailable).
-    
+
     Args:
         pd: Probability of Default as decimal
         threshold: PD cutoff for senior classification (default 0.10%)
-    
+
     Returns:
         "senior" or "non-senior"
-    
-    Note:
-        This is a heuristic. Actual seniority should come from deal structure.
     """
     return "senior" if pd <= threshold else "non-senior"
 
@@ -246,15 +277,15 @@ def pd_to_seniority(pd: float, threshold: float = 0.0010) -> str:
 def get_rw_base(cqs: int, seniority: str) -> float:
     """
     Look up base risk weight from regulatory tables.
-    
+
     Args:
         cqs: Credit Quality Step (1-17)
         seniority: "senior" or "non-senior"
-    
+
     Returns:
         RW_base as decimal (e.g., 0.15 for 15%)
     """
-    cqs = max(1, min(17, cqs))  # Clamp to valid range
+    cqs = max(1, min(17, cqs))
     senior_rw, non_senior_rw = RW_BASE_TABLE[cqs]
     return senior_rw if seniority.lower() == "senior" else non_senior_rw
 
@@ -262,10 +293,10 @@ def get_rw_base(cqs: int, seniority: str) -> float:
 def get_coefficients(cqs: int) -> Tuple[float, float, float]:
     """
     Get adjustment coefficients for given CQS.
-    
+
     Args:
         cqs: Credit Quality Step (1-17)
-    
+
     Returns:
         Tuple of (a, b, c) where:
             a, b: maturity adjustment coefficients
@@ -278,31 +309,31 @@ def get_coefficients(cqs: int) -> Tuple[float, float, float]:
 def calculate_maturity_factor(a: float, b: float, M_T: float) -> float:
     """
     Calculate maturity adjustment factor.
-    
-    Formula: maturity_factor = a + b × M_T
-    
+
+    Formula: maturity_factor = a + b * M_T
+
     Args:
         a: Intercept coefficient
         b: Slope coefficient
         M_T: Tranche maturity in years (will be floored at 1, capped at 5)
-    
+
     Returns:
         Maturity adjustment factor
     """
-    M_T = max(1.0, min(5.0, M_T))  # Floor 1, cap 5
+    M_T = max(1.0, min(5.0, M_T))
     return a + b * M_T
 
 
 def calculate_thickness_factor(T: float, c: float) -> float:
     """
     Calculate thickness adjustment factor (non-senior tranches only).
-    
+
     Formula: thickness_factor = T^(-c)
-    
+
     Args:
         T: Tranche thickness (Detachment - Attachment)
         c: Thickness exponent from coefficients table
-    
+
     Returns:
         Thickness adjustment factor
     """
@@ -314,11 +345,11 @@ def calculate_thickness_factor(T: float, c: float) -> float:
 def get_floor(seniority: str, is_STS: bool) -> float:
     """
     Determine RW floor based on seniority and STS status.
-    
+
     Args:
         seniority: "senior" or "non-senior"
         is_STS: Whether securitisation qualifies as STS
-    
+
     Returns:
         Floor as decimal
     """
@@ -338,7 +369,7 @@ def calculate_erba_rw(
 ) -> ERBAResult:
     """
     Calculate ERBA Risk Weight with full breakdown.
-    
+
     Args:
         cqs: Credit Quality Step (1-17)
         seniority: "senior" or "non-senior"
@@ -347,35 +378,34 @@ def calculate_erba_rw(
         is_STS: Whether securitisation qualifies as STS
         exposure: Optional exposure amount for RWA calculation
         verbose: If True, print detailed calculation
-    
+
     Returns:
         ERBAResult with all intermediate values and final RW
-    
+
     Formulas:
-        Senior:     RW = RW_base × (a + b × M_T)
-        Non-Senior: RW = RW_base × (a + b × M_T) × T^(-c)
+        Senior:     RW = RW_base * (a + b * M_T)
+        Non-Senior: RW = RW_base * (a + b * M_T) * T^(-c)
     """
     seniority = seniority.lower()
-    
-    # Validate inputs
+
     if seniority not in ("senior", "non-senior"):
         raise ValueError("Seniority must be 'senior' or 'non-senior'")
-    
+
     if seniority == "non-senior" and T is None:
         raise ValueError("Thickness T required for non-senior tranches")
-    
+
     # Cap/floor maturity
     M_T = max(1.0, min(5.0, M_T))
-    
+
     # Step 1: Look up base RW
     RW_base = get_rw_base(cqs, seniority)
-    
+
     # Step 2: Get coefficients
     a, b, c = get_coefficients(cqs)
-    
+
     # Step 3: Calculate maturity factor
     maturity_factor = calculate_maturity_factor(a, b, M_T)
-    
+
     # Step 4: Calculate RW
     if seniority == "senior":
         thickness_factor = None
@@ -383,16 +413,15 @@ def calculate_erba_rw(
     else:
         thickness_factor = calculate_thickness_factor(T, c)
         RW_unadjusted = RW_base * maturity_factor * thickness_factor
-    
+
     # Step 5: Apply floor and cap
     floor = get_floor(seniority, is_STS)
     cap = 12.50  # 1250%
     RW_final = max(floor, min(cap, RW_unadjusted))
-    
+
     # Step 6: Calculate RWA if exposure provided
     RWA = exposure * RW_final if exposure is not None else None
-    
-    # Build result
+
     result = ERBAResult(
         cqs=cqs,
         rating=CQS_TO_RATING.get(cqs, "N/A"),
@@ -413,10 +442,10 @@ def calculate_erba_rw(
         exposure=exposure,
         RWA=RWA,
     )
-    
+
     if verbose:
         print(result)
-    
+
     return result
 
 
@@ -432,12 +461,7 @@ def calculate_erba_from_pd(
 ) -> ERBAResult:
     """
     Calculate ERBA Risk Weight starting from PD.
-    
-    This is a convenience function that:
-    1. Maps PD to CQS
-    2. Infers seniority from PD (if not provided)
-    3. Applies default assumptions for M_T and T
-    
+
     Args:
         pd: Probability of Default as decimal (e.g., 0.0003 for 0.03%)
         M_T: Tranche maturity in years (default: 3)
@@ -447,21 +471,56 @@ def calculate_erba_from_pd(
         exposure: Optional exposure amount for RWA calculation
         seniority_threshold: PD cutoff for senior classification (default: 0.10%)
         verbose: If True, print detailed calculation
-    
+
     Returns:
         ERBAResult with all intermediate values and final RW
     """
-    # Map PD to CQS
     cqs = pd_to_cqs(pd)
-    
-    # Infer seniority if not provided
+
     if seniority is None:
-        seniority = pd_to_seniority(pd, seniority_threshold)
-    
+        seniority = infer_seniority(pd, seniority_threshold)
+
     # For senior tranches, T is not used
     if seniority.lower() == "senior":
         T = None
-    
+
+    return calculate_erba_rw(
+        cqs=cqs,
+        seniority=seniority,
+        M_T=M_T,
+        T=T,
+        is_STS=is_STS,
+        exposure=exposure,
+        verbose=verbose
+    )
+
+
+def calculate_erba_from_rating(
+    rating: str,
+    seniority: str,
+    M_T: float = 3.0,
+    T: Optional[float] = None,
+    is_STS: bool = False,
+    exposure: Optional[float] = None,
+    verbose: bool = False
+) -> ERBAResult:
+    """
+    Calculate ERBA Risk Weight from external rating.
+
+    Args:
+        rating: External rating (e.g., "AA", "BBB+")
+        seniority: "senior" or "non-senior"
+        M_T: Tranche maturity in years
+        T: Tranche thickness (required for non-senior)
+        is_STS: Whether securitisation qualifies as STS
+        exposure: Optional exposure amount for RWA calculation
+        verbose: If True, print detailed calculation
+
+    Returns:
+        ERBAResult with all intermediate values and final RW
+    """
+    cqs = rating_to_cqs(rating)
+
     return calculate_erba_rw(
         cqs=cqs,
         seniority=seniority,
@@ -477,59 +536,184 @@ def calculate_erba_from_pd(
 # CONVENIENCE FUNCTIONS
 # =============================================================================
 
-def quick_rw(pd: float, seniority: str = "senior", M_T: float = 3.0, T: float = 0.05) -> float:
+def quick_erba_rw(
+    pd: float = None,
+    rating: str = None,
+    cqs: int = None,
+    seniority: str = "senior",
+    M_T: float = 3.0,
+    T: float = 0.05,
+    is_STS: bool = False
+) -> float:
     """
-    Quick RW calculation with minimal inputs.
-    
+    Quick RW calculation with flexible inputs.
+
+    Provide one of: pd, rating, or cqs.
+
     Args:
         pd: Probability of Default as decimal
+        rating: External rating (e.g., "AA", "BBB+")
+        cqs: Credit Quality Step (1-17)
         seniority: "senior" or "non-senior"
         M_T: Tranche maturity in years
         T: Tranche thickness (for non-senior)
-    
+        is_STS: Whether STS qualified
+
     Returns:
         Final Risk Weight as decimal
-    
-    Example:
-        >>> quick_rw(0.0003, "senior", 3.0)
-        0.15
     """
-    result = calculate_erba_from_pd(pd, M_T, T, seniority)
+    if cqs is not None:
+        pass
+    elif pd is not None:
+        cqs = pd_to_cqs(pd)
+    elif rating is not None:
+        cqs = rating_to_cqs(rating)
+    else:
+        raise ValueError("Must provide one of: pd, rating, or cqs")
+
+    result = calculate_erba_rw(
+        cqs=cqs,
+        seniority=seniority,
+        M_T=M_T,
+        T=T if seniority.lower() == "non-senior" else None,
+        is_STS=is_STS
+    )
     return result.RW_final
 
 
-def print_rw_table(M_T: float = 3.0, T: float = 0.05):
+def calculate_erba_rwa(
+    ead: float,
+    rating: str = None,
+    pd: float = None,
+    cqs: int = None,
+    seniority: str = "senior",
+    maturity: float = 3.0,
+    thickness: float = 0.05,
+    is_sts: bool = False
+) -> dict:
     """
-    Print a complete RW lookup table for given M_T and T.
+    Calculate ERBA RWA - compatible interface with rwa_calc.py.
+
+    Args:
+        ead: Exposure at Default
+        rating: External rating (e.g., "AA", "BBB+")
+        pd: Probability of Default (alternative to rating)
+        cqs: Credit Quality Step (alternative to rating/pd)
+        seniority: "senior" or "non-senior"
+        maturity: Tranche maturity in years
+        thickness: Tranche thickness (detachment - attachment)
+        is_sts: Whether STS qualified
+
+    Returns:
+        dict with calculation results
     """
+    # Determine CQS from inputs
+    if cqs is not None:
+        pass
+    elif rating is not None:
+        cqs = rating_to_cqs(rating)
+    elif pd is not None:
+        cqs = pd_to_cqs(pd)
+    else:
+        raise ValueError("Must provide one of: rating, pd, or cqs")
+
+    # Calculate ERBA
+    T = thickness if seniority.lower() == "non-senior" else None
+    result = calculate_erba_rw(
+        cqs=cqs,
+        seniority=seniority,
+        M_T=maturity,
+        T=T,
+        is_STS=is_sts,
+        exposure=ead
+    )
+
+    return {
+        "approach": "CRR2 ERBA",
+        "ead": ead,
+        "rating": result.rating,
+        "cqs": result.cqs,
+        "seniority": seniority,
+        "maturity": maturity,
+        "thickness": thickness if seniority.lower() == "non-senior" else None,
+        "is_sts": is_sts,
+        "risk_weight_pct": result.RW_final * 100,
+        "rwa": result.RWA,
+        "capital_requirement_k": result.RW_final * 0.08,
+    }
+
+
+def print_erba_table(M_T: float = 3.0, T: float = 0.05):
+    """Print a complete RW lookup table for given M_T and T."""
     print(f"\nERBA Risk Weight Table (M_T={M_T}, T={T})")
     print("=" * 70)
-    print(f"{'PD Range':<18} {'CQS':<5} {'Rating':<8} {'Senior':<12} {'Non-Senior':<12}")
+    print(f"{'CQS':<5} {'Rating':<8} {'Senior':<12} {'Non-Senior':<12} {'STS Senior':<12}")
     print("-" * 70)
-    
-    pd_ranges = [
-        ("≤ 0.01%", 0.0001),
-        ("0.01% - 0.05%", 0.0003),
-        ("0.05% - 0.10%", 0.0007),
-        ("0.10% - 0.20%", 0.0015),
-        ("0.20% - 0.30%", 0.0025),
-        ("0.30% - 0.50%", 0.0040),
-        ("0.50% - 0.80%", 0.0065),
-        ("0.80% - 1.30%", 0.0100),
-        ("1.30% - 2.00%", 0.0165),
-        ("2.00% - 3.50%", 0.0275),
-        ("3.50% - 5.50%", 0.0450),
-        ("> 5.50%", 0.0700),
-    ]
-    
-    for pd_label, pd in pd_ranges:
-        cqs = pd_to_cqs(pd)
+
+    for cqs in range(1, 18):
         rating = CQS_TO_RATING[cqs]
-        senior_rw = quick_rw(pd, "senior", M_T, T)
-        non_senior_rw = quick_rw(pd, "non-senior", M_T, T)
-        print(f"{pd_label:<18} {cqs:<5} {rating:<8} {senior_rw:>10.2%}   {non_senior_rw:>10.2%}")
-    
+        senior_rw = quick_erba_rw(cqs=cqs, seniority="senior", M_T=M_T)
+        non_senior_rw = quick_erba_rw(cqs=cqs, seniority="non-senior", M_T=M_T, T=T)
+        sts_rw = quick_erba_rw(cqs=cqs, seniority="senior", M_T=M_T, is_STS=True)
+        print(f"{cqs:<5} {rating:<8} {senior_rw:>10.2%}   {non_senior_rw:>10.2%}   {sts_rw:>10.2%}")
+
     print("=" * 70)
+
+
+def compare_erba_simple_vs_crr2(
+    ead: float,
+    rating: str,
+    seniority: str,
+    maturity: float = 3.0,
+    thickness: float = 0.05
+) -> dict:
+    """
+    Compare simple ERBA (rwa_calc.py) vs CRR2 ERBA.
+
+    Args:
+        ead: Exposure at Default
+        rating: External rating
+        seniority: "senior" or "non-senior"
+        maturity: Tranche maturity
+        thickness: Tranche thickness
+
+    Returns:
+        dict with both approaches' results
+    """
+    # CRR2 ERBA
+    crr2_result = calculate_erba_rwa(
+        ead=ead,
+        rating=rating,
+        seniority=seniority,
+        maturity=maturity,
+        thickness=thickness
+    )
+
+    # Import simple ERBA from rwa_calc for comparison
+    try:
+        from rwa_calc import calculate_erba_rwa as simple_erba
+        simple_result = simple_erba(ead, rating, seniority, maturity)
+        simple_rw = simple_result["risk_weight_pct"]
+        simple_rwa = simple_result["rwa"]
+    except ImportError:
+        simple_rw = None
+        simple_rwa = None
+
+    return {
+        "ead": ead,
+        "rating": rating,
+        "seniority": seniority,
+        "maturity": maturity,
+        "thickness": thickness,
+        "crr2_erba": {
+            "risk_weight_pct": crr2_result["risk_weight_pct"],
+            "rwa": crr2_result["rwa"],
+        },
+        "simple_erba": {
+            "risk_weight_pct": simple_rw,
+            "rwa": simple_rwa,
+        } if simple_rw else None,
+    }
 
 
 # =============================================================================
@@ -537,13 +721,13 @@ def print_rw_table(M_T: float = 3.0, T: float = 0.05):
 # =============================================================================
 
 if __name__ == "__main__":
-    
-    print("\n" + "=" * 60)
-    print("ERBA MODULE - EXAMPLES")
-    print("=" * 60)
-    
+
+    print("\n" + "=" * 70)
+    print("CRR2 ERBA MODULE - EXAMPLES")
+    print("=" * 70)
+
     # Example 1: Full calculation with all inputs
-    print("\n--- Example 1: Full ERBA calculation ---")
+    print("\n--- Example 1: Full ERBA calculation (non-senior) ---")
     result = calculate_erba_rw(
         cqs=5,
         seniority="non-senior",
@@ -553,28 +737,52 @@ if __name__ == "__main__":
         exposure=1_000_000,
         verbose=True
     )
-    
+
     # Example 2: From PD with defaults
-    print("\n--- Example 2: ERBA from PD ---")
+    print("\n--- Example 2: ERBA from PD (senior) ---")
     result = calculate_erba_from_pd(
         pd=0.0003,  # 0.03%
         M_T=4.0,
         verbose=True
     )
-    
-    # Example 3: Quick RW lookup
-    print("\n--- Example 3: Quick RW lookups ---")
+
+    # Example 3: From rating
+    print("\n--- Example 3: ERBA from rating ---")
+    result = calculate_erba_from_rating(
+        rating="BBB",
+        seniority="senior",
+        M_T=2.5,
+        is_STS=True,
+        verbose=True
+    )
+
+    # Example 4: Quick RW lookups
+    print("\n--- Example 4: Quick RW lookups ---")
     test_cases = [
-        (0.0001, "senior"),
-        (0.0003, "senior"),
-        (0.0005, "senior"),
-        (0.0030, "non-senior"),
-        (0.0080, "non-senior"),
+        {"pd": 0.0001, "seniority": "senior"},
+        {"rating": "AA", "seniority": "senior"},
+        {"cqs": 5, "seniority": "non-senior", "T": 0.10},
+        {"rating": "BBB-", "seniority": "senior", "is_STS": True},
     ]
-    for pd, sen in test_cases:
-        rw = quick_rw(pd, sen, M_T=4.0, T=0.07)
-        print(f"  PD={pd:.4%}, {sen:<11} -> RW={rw:.2%}")
-    
-    # Example 4: Full table
-    print("\n--- Example 4: Complete RW Table ---")
-    print_rw_table(M_T=4.0, T=0.07)
+    for case in test_cases:
+        rw = quick_erba_rw(**case)
+        label = ", ".join(f"{k}={v}" for k, v in case.items())
+        print(f"  {label} -> RW={rw:.2%}")
+
+    # Example 5: RWA calculation (compatible interface)
+    print("\n--- Example 5: RWA calculation ---")
+    rwa_result = calculate_erba_rwa(
+        ead=10_000_000,
+        rating="A",
+        seniority="senior",
+        maturity=4.0,
+        is_sts=True
+    )
+    print(f"  EAD:     ${rwa_result['ead']:,.0f}")
+    print(f"  Rating:  {rwa_result['rating']} (CQS {rwa_result['cqs']})")
+    print(f"  RW:      {rwa_result['risk_weight_pct']:.1f}%")
+    print(f"  RWA:     ${rwa_result['rwa']:,.0f}")
+
+    # Example 6: Full table
+    print("\n--- Example 6: Complete RW Table ---")
+    print_erba_table(M_T=3.0, T=0.05)

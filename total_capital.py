@@ -66,8 +66,8 @@ from rwa_calc import (
     calculate_sa_rwa, calculate_rwa, calculate_airb_rwa,
     calculate_sec_sa_rwa, calculate_sec_irba_rwa, calculate_erba_rwa,
     compare_all_irb_approaches, compare_securitization_approaches,
-    RATING_TO_PD
 )
+from ratings import RATING_TO_PD
 from counterparty_risk import calculate_sa_ccr_ead, calculate_ba_cva
 from market_risk import calculate_frtb_sa, calculate_drc_charge, calculate_rrao
 from operational_risk import calculate_sma_capital

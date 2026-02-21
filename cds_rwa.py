@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from counterparty_risk import calculate_sa_ccr_ead, calculate_ba_cva, calculate_sa_cva
-from rwa_calc import calculate_rwa, calculate_sa_rwa, calculate_airb_rwa, RATING_TO_PD
+from rwa_calc import calculate_rwa, calculate_sa_rwa, calculate_airb_rwa
+from ratings import RATING_TO_PD, resolve_pd, resolve_rating_log_scale
 
 
 # =============================================================================
@@ -66,28 +67,7 @@ _SPECIFIC_RISK_WEIGHTS = {
 # Data model
 # =============================================================================
 
-def _resolve_pd(pd: Optional[float], rating: Optional[str]) -> float:
-    """Get PD from explicit value or rating lookup."""
-    if pd is not None:
-        return pd
-    if rating is not None and rating != "unrated":
-        return RATING_TO_PD.get(rating, RATING_TO_PD.get("BBB", 0.004))
-    return 0.004  # default BBB-ish
-
-
-def _resolve_rating(rating: Optional[str], pd: Optional[float]) -> str:
-    """Get a rating string, falling back to PD-based estimation."""
-    if rating is not None:
-        return rating
-    if pd is not None:
-        # find closest rating
-        best, best_dist = "unrated", float("inf")
-        for r, rpd in RATING_TO_PD.items():
-            d = abs(math.log(max(pd, 1e-8)) - math.log(max(rpd, 1e-8)))
-            if d < best_dist:
-                best, best_dist = r, d
-        return best
-    return "unrated"
+# Note: resolve_pd and resolve_rating_log_scale are imported from ratings.py
 
 
 @dataclass
@@ -165,7 +145,7 @@ def calculate_cds_ccr(trade: CDSTrade) -> dict:
 
     CDS is a credit derivative → SA-CCR credit asset class.
     """
-    ref_rating = _resolve_rating(trade.reference_entity_rating, trade.reference_entity_pd)
+    ref_rating = resolve_rating_log_scale(trade.reference_entity_rating, trade.reference_entity_pd)
     asset_class = rating_to_sa_ccr_asset_class(ref_rating, trade.is_index)
 
     # Delta: protection buyer is short credit risk of the reference → delta = -1
@@ -197,8 +177,8 @@ def calculate_cds_ccr(trade: CDSTrade) -> dict:
     ead = ead_result["ead"]
 
     # Risk weight the EAD against the counterparty (dealer)
-    cp_rating = _resolve_rating(trade.counterparty_rating, trade.counterparty_pd)
-    cp_pd = _resolve_pd(trade.counterparty_pd, trade.counterparty_rating)
+    cp_rating = resolve_rating_log_scale(trade.counterparty_rating, trade.counterparty_pd)
+    cp_pd = resolve_pd(trade.counterparty_pd, trade.counterparty_rating)
 
     if trade.approach == "irb":
         rw_result = calculate_rwa(ead=ead, pd=cp_pd, lgd=0.45, maturity=trade.maturity)
@@ -224,7 +204,7 @@ def calculate_cds_ccr(trade: CDSTrade) -> dict:
 
 def calculate_cds_cva(trade: CDSTrade, ead: float) -> dict:
     """CVA risk charge on the dealer counterparty."""
-    cp_rating = _resolve_rating(trade.counterparty_rating, trade.counterparty_pd)
+    cp_rating = resolve_rating_log_scale(trade.counterparty_rating, trade.counterparty_pd)
 
     counterparty = {
         "ead": ead,
@@ -255,8 +235,8 @@ def calculate_cds_credit_risk(trade: CDSTrade) -> dict:
         }
 
     # Protection seller: notional is the exposure
-    ref_pd = _resolve_pd(trade.reference_entity_pd, trade.reference_entity_rating)
-    ref_rating = _resolve_rating(trade.reference_entity_rating, trade.reference_entity_pd)
+    ref_pd = resolve_pd(trade.reference_entity_pd, trade.reference_entity_rating)
+    ref_rating = resolve_rating_log_scale(trade.reference_entity_rating, trade.reference_entity_pd)
 
     if trade.approach == "irb":
         lgd = 1 - trade.recovery_rate
@@ -290,7 +270,7 @@ def calculate_cds_market_risk(trade: CDSTrade) -> dict:
     if trade.book != "trading":
         return {"specific_risk_charge": 0.0, "rwa": 0.0, "details": "Banking book - no market risk charge."}
 
-    ref_rating = _resolve_rating(trade.reference_entity_rating, trade.reference_entity_pd)
+    ref_rating = resolve_rating_log_scale(trade.reference_entity_rating, trade.reference_entity_pd)
     weight = _SPECIFIC_RISK_WEIGHTS.get(ref_rating, _SPECIFIC_RISK_WEIGHTS["unrated"])
 
     # Index CDS gets a lower weight (simplified: 50% of single-name)
@@ -342,9 +322,9 @@ def calculate_cds_rwa(trade: CDSTrade) -> dict:
         "direction": "protection_buyer" if trade.is_protection_buyer else "protection_seller",
         "type": "index" if trade.is_index else "single_name",
         "spread_bps": trade.spread_bps,
-        "reference_entity_rating": _resolve_rating(trade.reference_entity_rating, trade.reference_entity_pd),
-        "reference_entity_pd": _resolve_pd(trade.reference_entity_pd, trade.reference_entity_rating),
-        "counterparty_rating": _resolve_rating(trade.counterparty_rating, trade.counterparty_pd),
+        "reference_entity_rating": resolve_rating_log_scale(trade.reference_entity_rating, trade.reference_entity_pd),
+        "reference_entity_pd": resolve_pd(trade.reference_entity_pd, trade.reference_entity_rating),
+        "counterparty_rating": resolve_rating_log_scale(trade.counterparty_rating, trade.counterparty_pd),
         "approach": trade.approach.upper(),
         "book": trade.book,
     }

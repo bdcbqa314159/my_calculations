@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from market_risk import calculate_frtb_sa
-from rwa_calc import RATING_TO_PD
+from ratings import RATING_TO_PD
 
 
 # =============================================================================

@@ -14,6 +14,20 @@ from scipy.stats import norm
 from dataclasses import dataclass
 from typing import Optional
 
+# Import rating/PD mapping from centralized module (re-exported for backward compatibility)
+from ratings import (
+    RATING_TO_PD,
+    get_rating_from_pd,
+    get_pd_range_for_rating,
+    resolve_pd,
+    resolve_rating,
+    normalize_rating,
+    IG_RATINGS,
+    HY_RATINGS,
+    is_investment_grade,
+    is_high_yield,
+)
+
 
 # =============================================================================
 # Maturity Configuration (for flexible maturity handling)
@@ -1035,116 +1049,8 @@ ERBA_RISK_WEIGHTS = {
     "below_CCC-": {"senior": (1250, 1250), "non_senior": (1250, 1250)},
 }
 
-# Approximate PD mapping from external ratings (based on historical default rates)
-RATING_TO_PD = {
-    "AAA": 0.0001,
-    "AA+": 0.0002,
-    "AA": 0.0003,
-    "AA-": 0.0005,
-    "A+": 0.0007,
-    "A": 0.0009,
-    "A-": 0.0015,
-    "BBB+": 0.0025,
-    "BBB": 0.0040,
-    "BBB-": 0.0075,
-    "BB+": 0.0125,
-    "BB": 0.0200,
-    "BB-": 0.0350,
-    "B+": 0.0550,
-    "B": 0.0900,
-    "B-": 0.1400,
-    "CCC+": 0.2000,
-    "CCC": 0.2700,
-    "CCC-": 0.3500,
-    "below_CCC-": 0.5000,
-}
-
-# Sorted list for reverse lookup (PD -> Rating)
-_PD_RATING_SORTED = sorted(RATING_TO_PD.items(), key=lambda x: x[1])
-
-
-def get_rating_from_pd(pd: float) -> str:
-    """
-    Get the closest external rating for a given PD value.
-
-    Uses the RATING_TO_PD mapping to find the rating whose PD is closest
-    to the provided value. This enables using PD-based data with rating-based
-    methodologies (SA-CR, ERBA, IAA).
-
-    Parameters:
-    -----------
-    pd : float
-        Probability of Default (e.g., 0.02 for 2%)
-
-    Returns:
-    --------
-    str
-        The closest external rating (e.g., "BB" for PD around 2%)
-
-    Examples:
-    ---------
-    >>> get_rating_from_pd(0.02)
-    'BB'
-    >>> get_rating_from_pd(0.005)
-    'BBB'
-    >>> get_rating_from_pd(0.0001)
-    'AAA'
-    """
-    if pd <= 0:
-        return "AAA"
-    if pd >= 0.5:
-        return "below_CCC-"
-
-    # Find the closest rating by PD
-    best_rating = "BBB"  # Default
-    min_distance = float("inf")
-
-    for rating, rating_pd in _PD_RATING_SORTED:
-        distance = abs(pd - rating_pd)
-        if distance < min_distance:
-            min_distance = distance
-            best_rating = rating
-
-    return best_rating
-
-
-def get_pd_range_for_rating(rating: str) -> tuple[float, float]:
-    """
-    Get the PD range that maps to a given rating.
-
-    Returns the midpoint boundaries between adjacent ratings.
-
-    Parameters:
-    -----------
-    rating : str
-        External credit rating
-
-    Returns:
-    --------
-    tuple[float, float]
-        (lower_bound, upper_bound) PD range for this rating
-    """
-    if rating not in RATING_TO_PD:
-        raise ValueError(f"Unknown rating: {rating}")
-
-    rating_pd = RATING_TO_PD[rating]
-    idx = next(i for i, (r, _) in enumerate(_PD_RATING_SORTED) if r == rating)
-
-    # Lower bound: midpoint with previous rating (or 0)
-    if idx == 0:
-        lower = 0.0
-    else:
-        prev_pd = _PD_RATING_SORTED[idx - 1][1]
-        lower = (prev_pd + rating_pd) / 2
-
-    # Upper bound: midpoint with next rating (or 1.0)
-    if idx == len(_PD_RATING_SORTED) - 1:
-        upper = 1.0
-    else:
-        next_pd = _PD_RATING_SORTED[idx + 1][1]
-        upper = (rating_pd + next_pd) / 2
-
-    return (lower, upper)
+# Note: RATING_TO_PD, get_rating_from_pd, get_pd_range_for_rating are now
+# imported from ratings.py and re-exported for backward compatibility.
 
 
 # =============================================================================

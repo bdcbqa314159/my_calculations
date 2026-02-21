@@ -19,40 +19,14 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from counterparty_risk import calculate_sa_ccr_ead, calculate_ba_cva
-from rwa_calc import calculate_rwa, calculate_sa_rwa, RATING_TO_PD
+from rwa_calc import calculate_rwa, calculate_sa_rwa
+from ratings import RATING_TO_PD, resolve_pd, resolve_rating_log_scale
 from market_risk import (
     EQ_RISK_WEIGHTS,
     CSR_RISK_WEIGHTS,
     COM_RISK_WEIGHTS,
     FX_RISK_WEIGHT,
 )
-
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
-def _resolve_pd(pd: Optional[float], rating: Optional[str]) -> float:
-    """Get PD from explicit value or rating lookup."""
-    if pd is not None:
-        return pd
-    if rating is not None and rating != "unrated":
-        return RATING_TO_PD.get(rating, RATING_TO_PD.get("BBB", 0.004))
-    return 0.004
-
-
-def _resolve_rating(rating: Optional[str], pd: Optional[float]) -> str:
-    """Get a rating string, falling back to PD-based estimation."""
-    if rating is not None:
-        return rating
-    if pd is not None:
-        best, best_dist = "unrated", float("inf")
-        for r, rpd in RATING_TO_PD.items():
-            d = abs(math.log(max(pd, 1e-8)) - math.log(max(rpd, 1e-8)))
-            if d < best_dist:
-                best, best_dist = r, d
-        return best
-    return "unrated"
 
 
 # =============================================================================
@@ -188,7 +162,7 @@ def calculate_trs_ccr(trade: TRSTrade) -> dict:
 
     Maps underlying to the appropriate SA-CCR asset class.
     """
-    und_rating = _resolve_rating(trade.underlying_rating, trade.underlying_pd)
+    und_rating = resolve_rating_log_scale(trade.underlying_rating, trade.underlying_pd)
     asset_class = _underlying_to_sa_ccr_class(trade.underlying_type, und_rating)
 
     # Delta: receiver is long the underlying → delta = +1
@@ -220,8 +194,8 @@ def calculate_trs_ccr(trade: TRSTrade) -> dict:
     ead = ead_result["ead"]
 
     # Risk weight the EAD against the counterparty
-    cp_rating = _resolve_rating(trade.counterparty_rating, trade.counterparty_pd)
-    cp_pd = _resolve_pd(trade.counterparty_pd, trade.counterparty_rating)
+    cp_rating = resolve_rating_log_scale(trade.counterparty_rating, trade.counterparty_pd)
+    cp_pd = resolve_pd(trade.counterparty_pd, trade.counterparty_rating)
 
     if trade.approach == "irb":
         rw_result = calculate_rwa(ead=ead, pd=cp_pd, lgd=0.45, maturity=trade.maturity)
@@ -247,7 +221,7 @@ def calculate_trs_ccr(trade: TRSTrade) -> dict:
 
 def calculate_trs_cva(trade: TRSTrade, ead: float) -> dict:
     """CVA risk charge on the dealer counterparty (BA-CVA)."""
-    cp_rating = _resolve_rating(trade.counterparty_rating, trade.counterparty_pd)
+    cp_rating = resolve_rating_log_scale(trade.counterparty_rating, trade.counterparty_pd)
 
     counterparty = {
         "ead": ead,
@@ -278,8 +252,8 @@ def calculate_trs_reference_risk(trade: TRSTrade) -> dict:
         }
 
     # Receiver: synthetic long → treat notional as exposure
-    und_pd = _resolve_pd(trade.underlying_pd, trade.underlying_rating)
-    und_rating = _resolve_rating(trade.underlying_rating, trade.underlying_pd)
+    und_pd = resolve_pd(trade.underlying_pd, trade.underlying_rating)
+    und_rating = resolve_rating_log_scale(trade.underlying_rating, trade.underlying_pd)
 
     if trade.approach == "irb":
         lgd = 0.45
@@ -359,8 +333,8 @@ def calculate_trs_rwa(trade: TRSTrade) -> dict:
     total_rwa = ccr["ccr_rwa"] + cva["cva_rwa"] + reference_risk["rwa"] + market_risk["rwa"]
     total_capital = total_rwa * 0.08
 
-    und_rating = _resolve_rating(trade.underlying_rating, trade.underlying_pd)
-    und_pd = _resolve_pd(trade.underlying_pd, trade.underlying_rating)
+    und_rating = resolve_rating_log_scale(trade.underlying_rating, trade.underlying_pd)
+    und_pd = resolve_pd(trade.underlying_pd, trade.underlying_rating)
 
     trade_summary = {
         "notional": trade.notional,
@@ -369,7 +343,7 @@ def calculate_trs_rwa(trade: TRSTrade) -> dict:
         "underlying_type": trade.underlying_type,
         "underlying_rating": und_rating,
         "underlying_pd": und_pd,
-        "counterparty_rating": _resolve_rating(trade.counterparty_rating, trade.counterparty_pd),
+        "counterparty_rating": resolve_rating_log_scale(trade.counterparty_rating, trade.counterparty_pd),
         "approach": trade.approach.upper(),
         "book": trade.book,
     }

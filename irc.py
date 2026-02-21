@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from enum import Enum
 
-from rwa_calc import RATING_TO_PD, get_rating_from_pd
+from ratings import RATING_TO_PD, get_rating_from_pd
 
 
 # =============================================================================
