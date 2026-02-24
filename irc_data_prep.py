@@ -36,6 +36,7 @@ Usage:
 """
 
 import math
+import warnings
 from datetime import datetime, date
 from typing import Union, Optional
 
@@ -125,6 +126,38 @@ DEFAULTS = {
     "is_long": True,
     "liquidity_horizon_months": 3,
     "coupon_rate": 0.05,
+}
+
+
+# =============================================================================
+# Known Sectors
+# =============================================================================
+# Recognized sector values. Unrecognized sectors trigger a warning.
+# Sectors with a dedicated transition matrix are marked with a comment.
+
+KNOWN_SECTORS = {
+    # Sectors that map to a specific transition matrix
+    "financial",
+    "financials",
+    "bank",
+    "insurance",
+    "sovereign",
+    "government",
+    # General corporate sectors (use default/region-based matrix)
+    "corporate",
+    "tech",
+    "energy",
+    "auto",
+    "retail",
+    "industrial",
+    "telecom",
+    "healthcare",
+    "utilities",
+    "real_estate",
+    "consumer",
+    "media",
+    "mining",
+    "transportation",
 }
 
 
@@ -591,7 +624,15 @@ def prepare_irc_data(
         clean["market_value"] = _to_float(clean.get("market_value"), clean["notional"])
         clean["seniority"] = _normalize_seniority(clean.get("seniority"))
         clean["lgd"] = _to_float(clean.get("lgd"))  # None = derive from seniority
-        clean["sector"] = str(clean.get("sector", DEFAULTS["sector"])).strip().lower()
+        sector = str(clean.get("sector", DEFAULTS["sector"])).strip().lower()
+        if sector not in KNOWN_SECTORS:
+            warnings.warn(
+                f"Row {i} (issuer={clean['issuer']}): unrecognized sector '{sector}'. "
+                f"Known sectors: {sorted(KNOWN_SECTORS)}. "
+                f"Position will use default/region-based transition matrix.",
+                stacklevel=2,
+            )
+        clean["sector"] = sector
         clean["region"] = str(clean.get("region", DEFAULTS["region"])).strip().upper()
         clean["is_long"] = _to_bool(clean.get("is_long"), DEFAULTS["is_long"])
         clean["liquidity_horizon_months"] = int(_to_float(
@@ -657,6 +698,27 @@ def validate_irc_data(data: Union[list, "pd.DataFrame"]) -> dict:
         errors.append("Missing tenor_years column")
     if not has_rating and not has_pd:
         errors.append("Missing both rating and pd columns (need at least one)")
+
+    # Check for unrecognized sectors
+    sector_col = None
+    for orig, std in col_mapping.items():
+        if std == "sector":
+            sector_col = orig
+            break
+
+    if sector_col:
+        unrecognized = set()
+        for rec in records:
+            val = rec.get(sector_col)
+            if val is not None:
+                sector_lower = str(val).strip().lower()
+                if sector_lower and sector_lower not in KNOWN_SECTORS:
+                    unrecognized.add(sector_lower)
+        if unrecognized:
+            warnings.append(
+                f"Unrecognized sectors: {sorted(unrecognized)}. "
+                f"Known sectors: {sorted(KNOWN_SECTORS)}"
+            )
 
     # Summary
     summary = {
